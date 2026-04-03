@@ -159,6 +159,7 @@ void ExchangeSim::advance_passive_orders(
             rep.fee_paid      = fee;
             rep.strategy_name = ord.strategy_name;
             reports.push_back(rep);
+            pending_fills_.push_back(rep);
             to_erase.push_back(oid);
         }
     }
