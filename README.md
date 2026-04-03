@@ -2,8 +2,6 @@
 
 A C++ event-driven **L2 limit order book replay and execution simulator** using free Binance market data.
 
-Built for quant/SWE recruiting — demonstrates correctness-first C++17, clean event-driven architecture, and high-throughput order book processing.
-
 ---
 
 ## Features
@@ -148,18 +146,6 @@ Free daily bookDepth files available at:
 ```
 https://data.binance.vision/?prefix=data/futures/um/daily/bookDepth/BTCUSDT/
 ```
-
----
-
-## Interview Pitch
-
-> I built a C++ event-driven limit order book simulator that reconstructs local L2 market depth
-> from Binance incremental updates using the official snapshot-and-diff synchronization algorithm.
-> The system replays historical order book data, simulates passive and aggressive execution with
-> latency assumptions and a queue-position approximation for passive fills, and exports structured
-> logs for Python analysis of PnL, fill quality, and adverse selection. I focused on correctness,
-> clean event-driven architecture, and performance — benchmarking at over 5 million events/second
-> for book-only replay and 2.3 million events/second with the market maker strategy running.
 
 ---
 
