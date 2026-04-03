@@ -1,0 +1,11 @@
+build/
+data/raw/
+data/recorded/
+data/processed/
+*.zip
+*.DS_Store
+python/.venv/
+__pycache__/
+*.pyc
+*.o
+*.a
