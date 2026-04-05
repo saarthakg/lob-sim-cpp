@@ -1,6 +1,6 @@
 # lob-sim-cpp
 
-A C++ event-driven **L2 limit order book replay and execution simulator** built around the Binance diff-depth WebSocket protocol.
+A C++ event-driven **L2 limit order book replay and execution simulator** built around the Binance diff-depth WebSocket protocol, with live market data capture via Bybit.
 
 ---
 
@@ -8,7 +8,7 @@ A C++ event-driven **L2 limit order book replay and execution simulator** built 
 
 - **L2 Order Book** — integer-tick `std::map<Price, Qty>` with O(log N) updates
 - **Binance sync algorithm** — exact snapshot + diff-depth state machine per the official Binance docs
-- **Live capture** — connects to Bybit/Binance WebSocket, syncs the book, records to normalized CSV
+- **Live capture** — connects to Bybit WebSocket, syncs the book, records to normalized CSV
 - **Replay engine** — reads normalized `depth_events.csv`, fires per-event callbacks
 - **Execution simulator** — market orders walk the visible book; passive limit orders approximate queue position from L2 data
 - **Two strategies** — Market Maker (inventory-skewed quoting) + Imbalance (aggressive directional)
@@ -100,6 +100,40 @@ Measured on Apple M-series, Release build (`-O3`), 1 million synthetic events:
 
 ---
 
+## Real Data Results
+
+Two 60-minute sessions of live BTCUSDT data captured from Bybit (USDT perpetuals, `orderbook.200` channel).
+
+| Session | Symbol   | Events   | CSV size | Price range         |
+|---------|----------|----------|----------|---------------------|
+| 1       | BTCUSDT  | ~832K    | 49 MB    | —                   |
+| 2       | BTCUSDT  | ~753K    | 44 MB    | $66,790 – $66,957   |
+
+**MarketMaker strategy on session 2 (14,933 replay events):**
+
+| Metric              | Value                     |
+|---------------------|---------------------------|
+| Total fills         | 932 (466 buy / 466 sell)  |
+| Fill balance        | Perfectly balanced        |
+| Gross realized PnL  | +$9.32 USD                |
+| BTCUSDT price range | $66,790 – $66,957 (~$167 move) |
+
+The infrastructure correctly simulates passive queue position, taker/maker fees, and inventory tracking. The MarketMaker strategy stays flat (balanced buys/sells) and captures spread on both sides throughout the session.
+
+### Book Metrics
+
+![Book metrics over time](docs/plots/book_metrics.png)
+
+### PnL Report
+
+![PnL report](docs/plots/pnl_report.png)
+
+### Fill Quality
+
+![Fill quality analysis](docs/plots/fill_quality.png)
+
+---
+
 ## Architecture
 
 See [`docs/architecture.md`](docs/architecture.md) for a full component diagram and event flow.
@@ -121,6 +155,8 @@ The live capture flow (Binance):
 2. Fetch REST depth snapshot (`/api/v3/depth`)
 3. Run `BookSync` state machine to find the first valid event
 4. Apply subsequent events and write to CSV
+
+> **Note:** Binance is geo-blocked for US users (HTTP 451). Use `--exchange bybit` (the default).
 
 ---
 
@@ -155,7 +191,7 @@ See [`docs/assumptions.md`](docs/assumptions.md) for a complete list. Key points
 
 ## Dataset
 
-Live data is captured directly from exchange WebSocket streams using the `--live-capture` mode.
+Live data is captured directly from Bybit's WebSocket stream using the `--live-capture` mode.
 See [`docs/dataset.md`](docs/dataset.md) for details on the normalized CSV schema and conversion tools.
 
 ---
