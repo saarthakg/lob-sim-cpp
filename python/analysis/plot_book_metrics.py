@@ -23,6 +23,11 @@ def plot(run_dir: str, save: bool = False):
     df = load_book_metrics(run_dir)
     print(f"Loaded {len(df):,} book snapshots from {run_dir}")
 
+    neg = (df["spread"] < 0).sum()
+    if neg > 0:
+        print(f"WARNING: filtered {neg} rows with negative spread (transient inconsistent state)")
+        df = df[df["spread"] >= 0].copy()
+
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
     fig.suptitle(f"Book Metrics — {Path(run_dir).name}", fontsize=14)
 

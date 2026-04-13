@@ -1,4 +1,5 @@
 #include "../../include/sim/exchange_sim.hpp"
+#include "../../include/core/types.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -47,8 +48,9 @@ std::vector<ExecutionReport> ExchangeSim::submit_market_order(
     }
 
     Price avg_price = total_cost / total_filled;
-    double notional = static_cast<double>(avg_price) * static_cast<double>(total_filled);
-    double fee      = notional * taker_fee_;
+    double notional = (static_cast<double>(avg_price) / TICK_MULTIPLIER)
+                    * (static_cast<double>(total_filled) / TICK_MULTIPLIER);
+    double fee      = notional * taker_fee_;  // USD
 
     portfolio.on_fill(order.side, avg_price, total_filled, fee);
 
@@ -143,8 +145,9 @@ void ExchangeSim::advance_passive_orders(
         // Check if we should fill: qty_ahead <= 0
         if (qty_ahead <= 0) {
             Qty fill_qty = ord.qty;
-            double notional = static_cast<double>(ord.price) * static_cast<double>(fill_qty);
-            double fee      = notional * maker_fee_;
+            double notional = (static_cast<double>(ord.price) / TICK_MULTIPLIER)
+                            * (static_cast<double>(fill_qty)  / TICK_MULTIPLIER);
+            double fee      = notional * maker_fee_;  // USD
 
             portfolio.on_fill(ord.side, ord.price, fill_qty, fee);
 

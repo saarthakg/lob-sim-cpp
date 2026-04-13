@@ -61,6 +61,8 @@ Modes:
 
 Options:
   --output <path>           Output directory (replay) or CSV file (live-capture)
+  --latency-us <N>          Simulated round-trip latency in microseconds (default: 0).
+                            Applied equally to market-data, decision, and order-entry delays.
   --duration-minutes <N>    Duration for live capture (default: 60)
   --help                    Show this help
 
@@ -152,7 +154,8 @@ static void run_load_snapshot(const std::string& path) {
 
 static void run_replay(const std::string& csv_path,
                        const std::string& strategy_name,
-                       const std::string& output_dir) {
+                       const std::string& output_dir,
+                       int64_t latency_us = 0) {
 
     fs::create_directories(output_dir);
 
@@ -165,7 +168,8 @@ static void run_replay(const std::string& csv_path,
     std::unique_ptr<CsvWriter> pnl_writer;
     std::unique_ptr<Strategy>  strategy;
     Portfolio  portfolio;
-    ExchangeSim exchange;
+    LatencyModel lat{latency_us, latency_us, latency_us};
+    ExchangeSim exchange(lat);
 
     bool has_strategy = !strategy_name.empty();
 
@@ -243,16 +247,19 @@ static void run_replay(const std::string& csv_path,
         auto bb = book.best_bid();
         auto ba = book.best_ask();
         if (bb && ba) {
-            metrics_writer.write_row({
-                std::to_string(ev.event_time),
-                std::to_string(bb->price),
-                std::to_string(bb->qty),
-                std::to_string(ba->price),
-                std::to_string(ba->qty),
-                std::to_string(static_cast<int64_t>(book.spread())),
-                std::to_string(static_cast<int64_t>(book.mid_price())),
-                std::to_string(book.imbalance(5))
-            });
+            double spread = book.spread();
+            if (spread >= 0.0) {
+                metrics_writer.write_row({
+                    std::to_string(ev.event_time),
+                    std::to_string(bb->price),
+                    std::to_string(bb->qty),
+                    std::to_string(ba->price),
+                    std::to_string(ba->qty),
+                    std::to_string(static_cast<int64_t>(spread)),
+                    std::to_string(static_cast<int64_t>(book.mid_price())),
+                    std::to_string(book.imbalance(5))
+                });
+            }
 
             // Run strategy
             if (has_strategy && strategy) {
@@ -266,15 +273,16 @@ static void run_replay(const std::string& csv_path,
                 }
 
                 // Write PnL snapshot
-                double mid = book.mid_price();
+                double mid     = book.mid_price();
+                double mid_usd = mid / TICK_MULTIPLIER;
                 pnl_writer->write_row({
                     std::to_string(ev.event_time),
                     std::to_string(portfolio.position()),
                     std::to_string(portfolio.cash()),
                     std::to_string(portfolio.realized_pnl()),
-                    std::to_string(portfolio.unrealized_pnl(mid)),
+                    std::to_string(portfolio.unrealized_pnl(mid_usd)),
                     std::to_string(static_cast<int64_t>(mid)),
-                    std::to_string(portfolio.total_pnl(mid))
+                    std::to_string(portfolio.total_pnl(mid_usd))
                 });
             }
         }
@@ -292,8 +300,9 @@ static void run_replay(const std::string& csv_path,
 
     if (has_strategy) {
         auto bb = book.best_bid();
-        double mark = bb ? bb->price : 0.0;
-        std::cout << "Final PnL: " << portfolio.total_pnl(mark) << "\n";
+        double mark     = bb ? bb->price : 0.0;
+        double mark_usd = mark / TICK_MULTIPLIER;
+        std::cout << "Final PnL: $" << portfolio.total_pnl(mark_usd) << " USD\n";
         std::cout << "Final position: " << portfolio.position() << "\n";
     }
 }
@@ -311,6 +320,7 @@ int main(int argc, char** argv) {
     std::string capture_symbol;
     std::string exchange = "bybit";  // default: bybit (US-accessible)
     int         duration_minutes = 60;
+    int64_t     latency_us = 0;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -340,6 +350,9 @@ int main(int argc, char** argv) {
         else if (arg == "--exchange" && i + 1 < argc) {
             exchange = argv[++i];
         }
+        else if (arg == "--latency-us" && i + 1 < argc) {
+            latency_us = std::stoll(argv[++i]);
+        }
     }
 
     if (mode == "synthetic") {
@@ -354,7 +367,7 @@ int main(int argc, char** argv) {
         if (output_dir.empty()) {
             output_dir = "data/processed/" + timestamp_dir();
         }
-        run_replay(csv_path, strategy_name, output_dir);
+        run_replay(csv_path, strategy_name, output_dir, latency_us);
     } else if (mode == "live") {
         if (capture_symbol.empty()) capture_symbol = "BTCUSDT";
         if (output_dir.empty()) {

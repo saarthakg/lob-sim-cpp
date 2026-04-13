@@ -109,6 +109,21 @@ TEST_CASE("OrderBook: clear empties the book", "[orderbook]") {
     REQUIRE(!book.best_ask().has_value());
 }
 
+TEST_CASE("OrderBook: spread is non-negative after valid bid/ask updates", "[orderbook]") {
+    OrderBook book;
+    BookSnapshot snap{};
+    snap.bids = {{6500000, 1000}};
+    snap.asks = {{6500200, 500}};
+    book.load_snapshot(snap);
+
+    book.apply_update(Side::Bid, 6500100, 800);
+    REQUIRE(book.spread() >= 0.0);
+    book.apply_update(Side::Ask, 6500300, 600);
+    REQUIRE(book.spread() >= 0.0);
+    book.apply_update(Side::Bid, 6500200, 0);  // delete crossing level
+    REQUIRE(book.spread() >= 0.0);
+}
+
 TEST_CASE("OrderBook: delete nonexistent level is a no-op", "[orderbook]") {
     OrderBook book;
     BookSnapshot snap{};

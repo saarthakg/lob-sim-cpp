@@ -96,7 +96,9 @@ TEST_CASE("ExchangeSim: taker fee applied correctly", "[execution]") {
     order.strategy_name = "test";
 
     auto reports = sim.submit_market_order(order, book, portfolio);
-    double expected_fee = static_cast<double>(6500100) * 100.0 * 0.001;
+    // fee = (price_usd * qty_units) * taker_rate
+    // price_usd = 6500100 / 100 = 65001.00,  qty_units = 100 / 100 = 1.0
+    double expected_fee = (6500100.0 / 100.0) * (100.0 / 100.0) * 0.001;
     REQUIRE(reports[0].fee_paid == Catch::Approx(expected_fee).epsilon(0.0001));
 }
 
