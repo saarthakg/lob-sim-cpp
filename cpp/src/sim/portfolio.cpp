@@ -8,17 +8,20 @@ void Portfolio::on_fill(Side side, Price px, Qty qty, double fee) {
 
     if (side == Side::Bid) {
         // Buying: spend cash, increase position
-        double fill_px = static_cast<double>(px);
+        double fill_px = static_cast<double>(px)  / TICK_MULTIPLIER;  // USD
+        double qty_d   = static_cast<double>(qty) / TICK_MULTIPLIER;  // units
         if (position_ >= 0) {
             // Adding to long position: update average cost
-            double total_cost = avg_cost_ * static_cast<double>(position_) + fill_px * static_cast<double>(qty);
+            double pos_units  = static_cast<double>(position_) / TICK_MULTIPLIER;
+            double total_cost = avg_cost_ * pos_units + fill_px * qty_d;
             position_ += qty;
-            avg_cost_ = (position_ > 0) ? (total_cost / static_cast<double>(position_)) : 0.0;
+            double new_pos_units = static_cast<double>(position_) / TICK_MULTIPLIER;
+            avg_cost_ = (position_ > 0) ? (total_cost / new_pos_units) : 0.0;
         } else {
             // Covering short position
             double pnl_per_unit = avg_cost_ - fill_px;
             Qty cover_qty = std::min(qty, -position_);
-            realized_ += pnl_per_unit * static_cast<double>(cover_qty);
+            realized_ += pnl_per_unit * (static_cast<double>(cover_qty) / TICK_MULTIPLIER);
             position_ += qty;
             if (position_ > 0) {
                 // Flipped to long
@@ -28,20 +31,23 @@ void Portfolio::on_fill(Side side, Price px, Qty qty, double fee) {
             }
             // If still short, avg_cost stays the same
         }
-        cash_ -= fill_px * static_cast<double>(qty);
+        cash_ -= fill_px * qty_d;
     } else {
         // Selling: receive cash, decrease position
-        double fill_px = static_cast<double>(px);
+        double fill_px = static_cast<double>(px)  / TICK_MULTIPLIER;  // USD
+        double qty_d   = static_cast<double>(qty) / TICK_MULTIPLIER;  // units
         if (position_ <= 0) {
             // Adding to short position
-            double total_cost = avg_cost_ * static_cast<double>(-position_) + fill_px * static_cast<double>(qty);
+            double pos_units  = static_cast<double>(-position_) / TICK_MULTIPLIER;
+            double total_cost = avg_cost_ * pos_units + fill_px * qty_d;
             position_ -= qty;
-            avg_cost_ = (position_ < 0) ? (total_cost / static_cast<double>(-position_)) : 0.0;
+            double new_pos_units = static_cast<double>(-position_) / TICK_MULTIPLIER;
+            avg_cost_ = (position_ < 0) ? (total_cost / new_pos_units) : 0.0;
         } else {
             // Reducing long position
             double pnl_per_unit = fill_px - avg_cost_;
             Qty reduce_qty = std::min(qty, position_);
-            realized_ += pnl_per_unit * static_cast<double>(reduce_qty);
+            realized_ += pnl_per_unit * (static_cast<double>(reduce_qty) / TICK_MULTIPLIER);
             position_ -= qty;
             if (position_ < 0) {
                 // Flipped to short
@@ -50,15 +56,17 @@ void Portfolio::on_fill(Side side, Price px, Qty qty, double fee) {
                 avg_cost_ = 0.0;
             }
         }
-        cash_ += fill_px * static_cast<double>(qty);
+        cash_ += fill_px * qty_d;
     }
 }
 
 double Portfolio::realized_pnl() const { return realized_; }
 
 double Portfolio::unrealized_pnl(double mark_price) const {
+    // mark_price must be in USD
     if (position_ == 0) return 0.0;
-    return (mark_price - avg_cost_) * static_cast<double>(position_);
+    double pos_units = static_cast<double>(position_) / TICK_MULTIPLIER;
+    return (mark_price - avg_cost_) * pos_units;
 }
 
 Qty    Portfolio::position() const { return position_; }

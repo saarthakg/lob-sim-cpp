@@ -22,8 +22,12 @@ def plot(run_dir: str, save: bool = False):
     df = load_pnl(run_dir)
     print(f"Loaded {len(df):,} PnL snapshots from {run_dir}")
 
+    final_realized = df.iloc[-1]["realized_pnl"]
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-    fig.suptitle(f"PnL Report — {Path(run_dir).name}", fontsize=14)
+    fig.suptitle(
+        f"PnL Report — {Path(run_dir).name}  |  Final Realized PnL: ${final_realized:.2f} USD",
+        fontsize=14
+    )
 
     # 1) Equity curve
     ax = axes[0]
@@ -31,7 +35,7 @@ def plot(run_dir: str, save: bool = False):
     ax.plot(df["ts"], df["realized_pnl"], linewidth=0.8, color="green", alpha=0.7, label="Realized")
     ax.plot(df["ts"], df["unrealized_pnl"], linewidth=0.8, color="orange", alpha=0.7, label="Unrealized")
     ax.axhline(0, color="black", linewidth=0.5, linestyle="--")
-    ax.set_ylabel("PnL (ticks × qty)")
+    ax.set_ylabel("Realized PnL (USD)")
     ax.set_title("Equity Curve")
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)

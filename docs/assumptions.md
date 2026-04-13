@@ -94,3 +94,15 @@ fill prices and fees.
 All prices are stored as integer ticks (`int64_t`) scaled by `TICK_MULTIPLIER = 100`.
 So $65,000.12 → 6,500,012 ticks. This eliminates floating-point rounding errors
 in price comparisons and map lookups.
+
+---
+
+## Passive Fill Rate is a Lower Bound
+
+The L2 passive fill model (`qty_ahead` approximation) tends to **underestimate fill rate**
+compared to a true FIFO L3 model. When visible quantity at our price level decreases,
+we snap `qty_ahead` to the new visible qty — but this ignores replenishment from new orders
+joining behind us. In reality, a passive order sitting at a stable level would see a higher
+fill rate as existing queue members fill and the order moves forward. The PnL estimates
+from the MarketMaker strategy should therefore be interpreted as a **conservative lower bound**
+on what a real passive strategy would achieve with equivalent parameters.
