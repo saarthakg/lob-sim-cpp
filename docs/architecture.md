@@ -20,7 +20,6 @@
 │                                         │                  │   │
 │                                         │  MarketMaker     │   │
 │                                         │  ImbalanceStrat  │   │
-│                                         │  TwapStrategy    │   │
 │                                         └──────────────────┘   │
 │                                                  │              │
 │                                                  ▼              │
@@ -85,15 +84,7 @@ output logging without changing the engine.
 ### Passive Queue Approximation
 See `docs/assumptions.md` for the full explanation. The key insight is that L2 data
 doesn't carry per-order identity, so queue position is estimated from changes in
-aggregate displayed quantity — and only ever re-evaluated on activity at the order's
-own exact price, never on unrelated book activity.
-
-### Order-Arrival Latency
-`ExchangeSim` treats `LatencyModel::total_us()` as a single delay between order
-submission and the order actually being matched against the book. At the default
-(zero latency) it's synchronous; with latency configured, orders queue in
-`pending_market_orders_` / `pending_limit_orders_` and are resolved against a later
-book state during a subsequent `on_market_event()` call. See `docs/assumptions.md`.
+aggregate displayed quantity.
 
 ## File Map
 
@@ -101,12 +92,12 @@ book state during a subsequent `on_market_event()` call. See `docs/assumptions.m
 cpp/include/core/         — types, side, level, book_snapshot, order_book (header)
 cpp/include/marketdata/   — binance event structs, parser, book_sync, recorder, replay_engine
 cpp/include/sim/          — sim_order, execution_report, latency_model, portfolio, exchange_sim
-cpp/include/strategy/     — strategy interface, market_maker, imbalance_strategy, twap_strategy
+cpp/include/strategy/     — strategy interface, market_maker, imbalance_strategy
 cpp/include/util/         — csv_writer, timer, json (nlohmann re-export)
 cpp/src/                  — implementations for all of the above
 cpp/app/main.cpp          — CLI dispatcher
-cpp/tests/                — Catch2 unit tests (order book, book sync, execution, parser, strategy, portfolio)
+cpp/tests/                — Catch2 unit tests
 cpp/bench/                — 1M-event benchmark
-python/analysis/          — pandas/matplotlib analytics scripts, incl. performance_report.py (Sharpe/drawdown/win-rate)
+python/analysis/          — pandas/matplotlib analytics scripts
 data/                     — raw, recorded, processed subdirs
 ```

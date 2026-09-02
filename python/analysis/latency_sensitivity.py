@@ -44,9 +44,7 @@ def load_run(run_dir: str):
     pnl_df = load_pnl(run_dir)
     final_pnl = pnl_df.iloc[-1]["realized_pnl"] if not pnl_df.empty else float("nan")
 
-    # only_filled=True: exclude Cancelled/Rejected rows (fill_price == 0),
-    # which would otherwise both inflate fill_count and corrupt mean_slippage.
-    fills = load_fills(run_dir, only_filled=True)
+    fills = load_fills(run_dir)
     fill_count = len(fills)
 
     mean_slippage = float("nan")

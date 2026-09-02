@@ -7,7 +7,6 @@ struct ExecutionReport {
     OrderId     order_id;
     Timestamp   ts;
     Side        side;
-    OrderType   order_type;    // Market or Limit — set by ExchangeSim, not inferred downstream
     OrderStatus status;
     Price       fill_price;    // weighted average if multi-level
     Qty         fill_qty;
