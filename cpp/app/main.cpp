@@ -7,7 +7,6 @@
 #include "../include/sim/portfolio.hpp"
 #include "../include/strategy/market_maker.hpp"
 #include "../include/strategy/imbalance_strategy.hpp"
-#include "../include/strategy/twap_strategy.hpp"
 #include "../include/util/csv_writer.hpp"
 #include "../include/util/timer.hpp"
 #include "live_capture.hpp"
@@ -52,10 +51,6 @@ Modes:
 
   --strategy imbalance --replay <csv_path> [--output <dir>]
         Run ImbalanceStrategy over replay.
-        Exports fills.csv, pnl.csv, book_metrics.csv.
-
-  --strategy twap --replay <csv_path> [--output <dir>]
-        Run TwapStrategy (scheduled slice execution) over replay.
         Exports fills.csv, pnl.csv, book_metrics.csv.
 
   --live-capture <SYMBOL> --output <csv_path> [--duration-minutes <N>]
@@ -184,25 +179,12 @@ static void run_replay(const std::string& csv_path,
                                      "fill_price_ticks","fill_qty","fee","status"});
         pnl_writer = std::make_unique<CsvWriter>(output_dir + "/pnl.csv",
             std::vector<std::string>{"ts","position","cash","realized_pnl",
-                                     "unrealized_pnl","mark_mid_ticks","total_pnl",
-                                     "fees_paid_cumulative","net_pnl"});
+                                     "unrealized_pnl","mark_mid_ticks","total_pnl"});
 
         if (strategy_name == "mm") {
-            // quote_tick_size=10: this project's Bybit BTCUSDT capture only ever
-            // shows resting depth on multiples of 10 raw ticks ($0.10) — the
-            // venue's real minimum price increment is coarser than our raw
-            // internal tick. A quote that isn't a multiple of the real tick
-            // size can never coincide with genuine market activity and so can
-            // never realistically fill (see MarketMaker::Config::quote_tick_size).
-            // A production system would read this from the venue's exchange-info
-            // API rather than hardcoding it.
-            MarketMaker::Config mm_cfg;
-            mm_cfg.quote_tick_size = 10;
-            strategy = std::make_unique<MarketMaker>(mm_cfg);
+            strategy = std::make_unique<MarketMaker>();
         } else if (strategy_name == "imbalance") {
             strategy = std::make_unique<ImbalanceStrategy>();
-        } else if (strategy_name == "twap") {
-            strategy = std::make_unique<TwapStrategy>();
         } else {
             std::cerr << "Unknown strategy: " << strategy_name << "\n";
             return;
@@ -215,14 +197,14 @@ static void run_replay(const std::string& csv_path,
     timer.start();
     size_t event_count = 0;
 
-    auto write_fill = [&](const ExecutionReport& rep) {
+    auto write_fill = [&](const ExecutionReport& rep, const std::string& order_type) {
         if (!fills_writer) return;
         fills_writer->write_row({
             std::to_string(rep.ts),
             std::to_string(rep.order_id),
             rep.strategy_name,
             (rep.side == Side::Bid ? "B" : "A"),
-            (rep.order_type == OrderType::Market ? "Market" : "Limit"),
+            order_type,
             std::to_string(rep.fill_price),
             std::to_string(rep.fill_qty),
             std::to_string(rep.fee_paid),
@@ -285,7 +267,9 @@ static void run_replay(const std::string& csv_path,
 
                 // Drain all fills (passive + market orders from this event)
                 for (const auto& rep : exchange.drain_fills()) {
-                    write_fill(rep);
+                    std::string otype = (rep.status == OrderStatus::Cancelled) ? "Limit"
+                                      : (rep.fill_price == 0) ? "Limit" : "Market";
+                    write_fill(rep, otype);
                 }
 
                 // Write PnL snapshot
@@ -298,9 +282,7 @@ static void run_replay(const std::string& csv_path,
                     std::to_string(portfolio.realized_pnl()),
                     std::to_string(portfolio.unrealized_pnl(mid_usd)),
                     std::to_string(static_cast<int64_t>(mid)),
-                    std::to_string(portfolio.total_pnl(mid_usd)),
-                    std::to_string(portfolio.total_fees_paid()),
-                    std::to_string(portfolio.net_pnl(mid_usd))
+                    std::to_string(portfolio.total_pnl(mid_usd))
                 });
             }
         }
@@ -317,14 +299,11 @@ static void run_replay(const std::string& csv_path,
     std::cout << "Output written to: " << output_dir << "\n";
 
     if (has_strategy) {
-        // Mark at mid, matching every per-row snapshot in pnl.csv (previously
-        // this used best_bid, a different — and for a long position, biased —
-        // mark price than the rest of the run's output).
-        double mark_usd = book.mid_price() / TICK_MULTIPLIER;
-        std::cout << "Final gross PnL: $" << portfolio.total_pnl(mark_usd) << " USD\n";
-        std::cout << "Total fees paid: $" << portfolio.total_fees_paid() << " USD\n";
-        std::cout << "Final net PnL:   $" << portfolio.net_pnl(mark_usd) << " USD\n";
-        std::cout << "Final position:  " << portfolio.position() << "\n";
+        auto bb = book.best_bid();
+        double mark     = bb ? bb->price : 0.0;
+        double mark_usd = mark / TICK_MULTIPLIER;
+        std::cout << "Final PnL: $" << portfolio.total_pnl(mark_usd) << " USD\n";
+        std::cout << "Final position: " << portfolio.position() << "\n";
     }
 }
 

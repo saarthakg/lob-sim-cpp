@@ -23,26 +23,19 @@ def plot(run_dir: str, save: bool = False):
     print(f"Loaded {len(df):,} PnL snapshots from {run_dir}")
 
     final_realized = df.iloc[-1]["realized_pnl"]
-    has_net = df["net_pnl"].notna().all() and len(df) > 0
-    # Note: deliberately no literal "$" here — matplotlib's mathtext parser
-    # treats a pair of "$" anywhere in a title as a math expression to render,
-    # which mangles the whole string when two independent "$N.NN" values sit
-    # in the same title (each contributes one "$", forming an accidental pair).
-    title = f"PnL Report — {Path(run_dir).name}  |  Final Realized (gross) PnL: {final_realized:.2f} USD"
-    if has_net:
-        title += f"  |  Final Net PnL: {df.iloc[-1]['net_pnl']:.2f} USD"
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-    fig.suptitle(title, fontsize=14)
+    fig.suptitle(
+        f"PnL Report — {Path(run_dir).name}  |  Final Realized PnL: ${final_realized:.2f} USD",
+        fontsize=14
+    )
 
     # 1) Equity curve
     ax = axes[0]
-    ax.plot(df["ts"], df["total_pnl"], linewidth=0.8, color="steelblue", label="Total PnL (gross)")
-    ax.plot(df["ts"], df["realized_pnl"], linewidth=0.8, color="green", alpha=0.7, label="Realized (gross)")
+    ax.plot(df["ts"], df["total_pnl"], linewidth=0.8, color="steelblue", label="Total PnL")
+    ax.plot(df["ts"], df["realized_pnl"], linewidth=0.8, color="green", alpha=0.7, label="Realized")
     ax.plot(df["ts"], df["unrealized_pnl"], linewidth=0.8, color="orange", alpha=0.7, label="Unrealized")
-    if has_net:
-        ax.plot(df["ts"], df["net_pnl"], linewidth=1.1, color="crimson", label="Net PnL (post-fee)")
     ax.axhline(0, color="black", linewidth=0.5, linestyle="--")
-    ax.set_ylabel("PnL (USD)")
+    ax.set_ylabel("Realized PnL (USD)")
     ax.set_title("Equity Curve")
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
@@ -81,13 +74,10 @@ def plot(run_dir: str, save: bool = False):
 
     # Summary
     final = df.iloc[-1]
-    print(f"\nFinal realized PnL (gross):   {final['realized_pnl']:.4f}")
-    print(f"Final unrealized PnL:         {final['unrealized_pnl']:.4f}")
-    print(f"Final total PnL (gross):      {final['total_pnl']:.4f}")
-    if has_net:
-        print(f"Total fees paid:              {final['fees_paid_cumulative']:.4f}")
-        print(f"Final net PnL (post-fee):     {final['net_pnl']:.4f}")
-    print(f"Final position:               {final['position']}")
+    print(f"\nFinal realized PnL:   {final['realized_pnl']:.4f}")
+    print(f"Final unrealized PnL: {final['unrealized_pnl']:.4f}")
+    print(f"Final total PnL:      {final['total_pnl']:.4f}")
+    print(f"Final position:       {final['position']}")
 
 
 def main():

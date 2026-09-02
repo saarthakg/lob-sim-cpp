@@ -25,9 +25,6 @@ public:
     std::vector<Level> top_n_bids(int n) const;
     std::vector<Level> top_n_asks(int n) const;
 
-    size_t bid_levels() const { return bids_.size(); }
-    size_t ask_levels() const { return asks_.size(); }
-
     UpdateId update_id() const;
     void set_update_id(UpdateId id);
 
