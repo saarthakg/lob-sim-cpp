@@ -5,6 +5,7 @@
 
 void Portfolio::on_fill(Side side, Price px, Qty qty, double fee) {
     cash_ -= fee;
+    total_fees_paid_ += fee;
 
     if (side == Side::Bid) {
         // Buying: spend cash, increase position
@@ -76,12 +77,17 @@ double Portfolio::total_pnl(double mark_price) const {
     return realized_ + unrealized_pnl(mark_price);
 }
 
+double Portfolio::total_fees_paid() const { return total_fees_paid_; }
+
 void Portfolio::log_state(Timestamp ts, double mark_price) const {
-    std::printf("[Portfolio ts=%lld] pos=%lld cash=%.2f realized=%.4f unrealized=%.4f total=%.4f\n",
+    std::printf("[Portfolio ts=%lld] pos=%lld cash=%.2f realized=%.4f unrealized=%.4f "
+                "total=%.4f fees=%.4f net=%.4f\n",
         (long long)ts,
         (long long)position_,
         cash_,
         realized_,
         unrealized_pnl(mark_price),
-        total_pnl(mark_price));
+        total_pnl(mark_price),
+        total_fees_paid_,
+        net_pnl(mark_price));
 }
