@@ -20,7 +20,9 @@ from load_logs import load_fills, load_book_metrics
 
 
 def plot(run_dir: str, save: bool = False):
-    fills = load_fills(run_dir)
+    # only_filled=True: exclude Cancelled/Rejected rows, which have
+    # fill_price == 0 and would otherwise corrupt slippage as a huge outlier.
+    fills = load_fills(run_dir, only_filled=True)
     metrics = load_book_metrics(run_dir)
 
     if fills.empty:

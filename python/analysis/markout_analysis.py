@@ -67,7 +67,10 @@ def compute_markouts(fills: pd.DataFrame, metrics: pd.DataFrame) -> pd.DataFrame
 
 
 def plot(run_dir: str, save: bool = False):
-    fills   = load_fills(run_dir)
+    # only_filled=True: exclude Cancelled/Rejected rows, which have
+    # fill_price == 0 and would otherwise corrupt slippage/markout as a huge
+    # outlier (every cancellation would look like a full-price adverse move).
+    fills   = load_fills(run_dir, only_filled=True)
     metrics = load_book_metrics(run_dir)
 
     if fills.empty:
