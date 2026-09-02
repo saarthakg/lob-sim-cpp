@@ -326,8 +326,8 @@ See [`docs/dataset.md`](docs/dataset.md) for details on the normalized CSV schem
 
 - [ ] L3 order-level simulation (requires ITCH or proprietary OMS feed)
 - [ ] Multi-threaded engine with lock-free book updates
-- [x] Additional strategies — TWAP done; momentum / spread arbitrage still open
-- [x] Order-arrival latency is now real (deterministic delay) — a log-normal jitter distribution and co-location tiers are still open
+- [ ] Additional strategies — momentum, spread arbitrage (TWAP is done; see Strategies)
+- [ ] Latency jitter — a log-normal distribution and co-location tiers, on top of the deterministic delay that's already modeled (see Assumptions)
 - [ ] Parquet output for large-scale analysis
 - [ ] Auto-detect venue tick size from exchange-info (`MarketMaker::Config::quote_tick_size` is hardcoded per-venue today)
 - [ ] Trade-print (aggTrade) ingestion, so passive fills can be evidenced by real trades crossing a level instead of only by displayed-quantity changes
