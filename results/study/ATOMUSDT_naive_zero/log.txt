@@ -1,0 +1,17 @@
+[test] 1 parameter sets x 8 days
+       day split  params  maker_fills  taker_fills   notional  gross_pnl  fees  net_pnl  net_pnl_flat  net_bps_of_notional    edge  markout_5s  max_drawdown  max_abs_position
+2026-09-28  test default        24239            0 2224697.03    -490.54   0.0  -490.54       -491.75                -2.20 -221.37     -455.88        491.53             999.3
+2026-09-29  test default        20079            0 1706096.00    -320.97   0.0  -320.97       -321.88                -1.88  -74.60     -338.00        329.82             999.9
+2026-09-30  test default        15764            0 1218547.45    -199.11   0.0  -199.11       -199.50                -1.63  -43.93     -225.92        206.66             999.8
+2026-10-01  test default        15049            0 1205961.29    -144.42   0.0  -144.42       -144.54                -1.20  -34.83     -221.81        151.31             999.9
+2026-10-02  test default        14824            0 1205429.75    -207.51   0.0  -207.51       -208.32                -1.72  -28.31     -213.54        211.53             999.3
+2026-10-03  test default         7220            0  545826.97    -149.29   0.0  -149.29       -150.02                -2.74    8.40     -131.62        150.65             999.1
+2026-10-04  test default        10332            0  887223.56    -157.54   0.0  -157.54       -158.69                -1.78  -24.67     -198.32        162.87             999.6
+2026-10-05  test default        11928            0 1025160.10    -162.87   0.0  -162.87       -163.20                -1.59   17.01     -198.94        168.95             997.9
+
+Test-day net PnL by parameter set: mean / std / % days positive / total
+           mean     std  pct_pos    total
+params                                   
+default -229.03  120.24      0.0 -1832.25
+
+wrote /Users/saarthakgupta/code/Finance Project/lob-sim-cpp/results/study/ATOMUSDT_naive_zero/results.csv
