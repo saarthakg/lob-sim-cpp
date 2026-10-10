@@ -14,11 +14,56 @@
                                                         └─────────────────────────────────────────────┘
 ```
 
+## Three ways to drive the same strategy code
+
+| Mode | Market data | Exchange | Entry point |
+|---|---|---|---|
+| L2 backtest | Bybit ob200 archive + trades (`BybitHistoricalSource`) | `ExchangeSim`: queue-model fills | `lob_sim --replay x.data.zip --trades y.csv.gz` |
+| L3 backtest | order-level capture (`L3EventSource`, `.l3bin`) | `L3ExchangeSim`: our orders in the real FIFO | `lob_sim --replay x.l3bin` |
+| Live paper trading | Bybit WebSocket (`LiveBybitSource`) | `ExchangeSim`, matching in real time | `lob_sim --live bybit --symbol BTCUSDT` |
+
+All three go through the same `Backtester` and `Strategy` interfaces; only
+the `EventSource` and the `Exchange` change.
+
+## Live threading model
+
+```
+ WebSocket thread (IXWebSocket)                 engine thread
+ ───────────────────────────────                ─────────────────────────────────────────
+ frame → local_ns = steady_clock                Backtester::run()
+       → bybit::parse_book / parse_trades         next(): spin-pop SpscRing (yield after 4k spins)
+       → MarketEvent{ts = matching-engine time}   → exchange: fills/acks (simulated venue)
+       → SpscRing::try_push (backpressure)        → strategy callback → submit/cancel
+                                                   ↑ recv→engine        ↑ engine→trade, tick→trade
+```
+
+- **One producer, one consumer, no locks.** Head and tail live on separate
+  cache lines, and each side caches the other's index.
+- **Backpressure instead of dropping.** A lost book delta would corrupt the
+  book, so a full ring makes the producer wait.
+- **Event timestamps are exchange time,** so strategy timers and latency
+  channels behave exactly as in a backtest. Latency *measurements* use the
+  local monotonic clock.
+
+## Order-level book internals
+
+```
+ order id ──FlatHashMap──▶ pool index ──▶ Order {id, price, qty, prev, next, level}
+                                               │ intrusive FIFO per level
+ price ──PriceLadder──▶ level index ──▶ Level {price, total, count, head, tail}
+          dense window [base, base + 2^k) + 2-level occupancy bitmap; std::map overflow
+```
+
 ## Components
 
 | Path | Role |
 |---|---|
 | `core/order_book` | `std::map` L2 book in integer ticks/lots. Provides mid, weighted mid, touch and depth-band imbalance. `order_book_flat` is a sorted-vector variant kept for the benchmark. |
+| `core/l3_book`, `core/price_ladder`, `util/flat_hash_map`, `util/object_pool` | Order-level book: pooled orders in intrusive FIFOs, open-addressing id map, bitmap-indexed price ladder. `core/reference_l3_book` is the textbook version used as test oracle and benchmark baseline. |
+| `marketdata/l3_format`, `marketdata/l3_record` | Fixed 48-byte binary order-level records (`.l3bin`); Bitstamp converter. |
+| `marketdata/bybit_parse` | Fixed-point parsers for Bybit book and trade messages, shared by the archive reader and the live feed. |
+| `sim/exchange`, `sim/l3_exchange_sim` | `Exchange` interface; exact-queue exchange for order-level replay. |
+| `live/live_bybit_source`, `util/spsc_ring` | Real-time feed on its own thread, handed to the engine through a lock-free SPSC ring (`lob_live` library, keeping networking out of `lob_core`). |
 | `marketdata/event_source` | `BybitHistoricalSource` is a hand-rolled parser for the JSON-lines book and the trade CSV. It merges trades before book updates with the same or later `cts` and auto-detects tick and lot. `NormalizedCsvSource` reads v2 and legacy v1 CSVs. `VectorSource` is used by tests. |
 | `marketdata/recorder`, `app/live_capture.hpp` | v2 capture with snapshots and trades. `book_sync` and `parser` handle the Binance U/u handshake and JSON. |
 | `sim/exchange_sim` | Matching for *our* orders against the replay: post-only, IOC and market orders; queue model; three fill rules; cancel-after-fill rejects; maker/taker fees including rebates. |
