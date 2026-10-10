@@ -1,50 +1,29 @@
 #include "../../include/strategy/imbalance_strategy.hpp"
 
-ImbalanceStrategy::ImbalanceStrategy(Config config) : config_(config) {}
-ImbalanceStrategy::ImbalanceStrategy() : ImbalanceStrategy(Config{}) {}
+void ImbalanceStrategy::on_timer(StrategyContext& ctx) {
+    const OrderBook& book = ctx.book();
+    if (book.empty()) return;
+    // Don't act while a market order is still in flight.
+    pending_ = false;
+    for (const auto& [id, o] : ctx.orders()) { (void)id; if (o.type == OrderType::Market) pending_ = true; }
+    if (pending_) return;
 
-void ImbalanceStrategy::on_market_event(Timestamp ts, const OrderBook& book,
-                                         ExchangeSim& exchange, Portfolio& portfolio) {
-    if (cooldown_remaining_ > 0) {
-        --cooldown_remaining_;
+    const double imb = book.imbalance(cfg_.depth_levels);
+    const Qty pos = ctx.position();
+    const Timestamp now = ctx.now();
+
+    if (pos != 0) {
+        const bool flipped = (pos > 0 && imb < -cfg_.threshold) || (pos < 0 && imb > cfg_.threshold);
+        if (flipped || now - entry_ts_ >= cfg_.hold_us) {
+            ctx.submit_market(pos > 0 ? Side::Ask : Side::Bid, pos > 0 ? pos : -pos);
+            cooldown_until_ = now + cfg_.cooldown_us;
+        }
         return;
     }
-
-    // Only trade when flat (simple version)
-    if (portfolio.position() != 0) return;
-
-    double imb = book.imbalance(config_.depth_levels);
-
-    auto best_bid = book.best_bid();
-    auto best_ask = book.best_ask();
-    if (!best_bid || !best_ask) return;
-
-    if (imb > config_.imbalance_threshold) {
-        // Strong buy pressure → aggressive buy
-        OrderId oid = exchange.next_order_id();
-        SimOrder order{};
-        order.order_id      = oid;
-        order.ts            = ts;
-        order.side          = Side::Bid;
-        order.type          = OrderType::Market;
-        order.price         = 0;
-        order.qty           = config_.order_size;
-        order.strategy_name = name();
-        exchange.submit_market_order(order, book, portfolio);
-        cooldown_remaining_ = config_.cooldown_events;
-
-    } else if (imb < -config_.imbalance_threshold) {
-        // Strong sell pressure → aggressive sell
-        OrderId oid = exchange.next_order_id();
-        SimOrder order{};
-        order.order_id      = oid;
-        order.ts            = ts;
-        order.side          = Side::Ask;
-        order.type          = OrderType::Market;
-        order.price         = 0;
-        order.qty           = config_.order_size;
-        order.strategy_name = name();
-        exchange.submit_market_order(order, book, portfolio);
-        cooldown_remaining_ = config_.cooldown_events;
+    if (now < cooldown_until_) return;
+    if (imb > cfg_.threshold) {
+        if (ctx.submit_market(Side::Bid, cfg_.order_qty)) entry_ts_ = now;
+    } else if (imb < -cfg_.threshold) {
+        if (ctx.submit_market(Side::Ask, cfg_.order_qty)) entry_ts_ = now;
     }
 }
