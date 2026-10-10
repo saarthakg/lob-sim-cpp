@@ -1,115 +1,101 @@
 #pragma once
 #include "../core/order_book.hpp"
-#include "../marketdata/binance_depth_event.hpp"
-#include "sim_order.hpp"
+#include "../marketdata/market_event.hpp"
 #include "execution_report.hpp"
 #include "portfolio.hpp"
-#include "latency_model.hpp"
-#include <vector>
+#include "sim_order.hpp"
 #include <unordered_map>
+#include <vector>
 
-struct PassiveOrderState {
-    SimOrder order;
-    Qty      qty_ahead;            // estimated queue position (L2 approximation)
-    Qty      level_qty_at_entry;   // visible qty at this level when order was placed
+// Fee rates as a fraction of notional. Negative = rebate.
+// Defaults: Bybit USDT perpetual VIP0 (maker 0.02%, taker 0.055%).
+struct FeeSchedule {
+    double maker = 0.0002;
+    double taker = 0.00055;
 };
 
-// An order that has been accepted (passed risk/self-cross checks) but has not
-// yet "arrived" at the exchange because LatencyModel::total_us() > 0. It sits
-// here until a market event's timestamp reaches arrival_ts, at which point it
-// is matched/registered against the book as it exists *then* — not as it was
-// at decision time. This is what makes latency actually affect fills.
-struct PendingMarketOrder {
-    SimOrder  order;
-    Timestamp arrival_ts;
+// How the queue ahead of a resting order advances when the displayed size at
+// its price shrinks for reasons other than trades (i.e. cancellations).
+// See docs/assumptions.md and hftbacktest's queue models, which these follow.
+struct QueueModel {
+    enum class Kind {
+        RiskAverse,  // every cancel is assumed to come from *behind* us (pessimistic)
+        ProbPower,   // P(cancel is behind us) = back^n / (back^n + front^n)
+        ProbLog      // P(cancel is behind us) = ln(1+back) / (ln(1+back) + ln(1+front))
+    };
+    Kind   kind  = Kind::ProbPower;
+    double power = 2.0;
+
+    // Probability that a cancellation at our level came from behind us.
+    double prob_behind(double front, double back) const;
 };
 
-struct PendingLimitOrder {
-    SimOrder  order;
-    Timestamp arrival_ts;
+struct ExchangeConfig {
+    FeeSchedule fees;
+    QueueModel  queue;
+    // If true (default), an order whose price the opposite side's best quote
+    // has moved *through* is filled even without a matching trade print —
+    // the only fill evidence available when no trade feed is loaded.
+    bool fill_on_cross = true;
 };
 
+// Simulated matching engine for *our* orders against a replayed market.
+//
+// The replayed book is the real market and our orders are an overlay on top
+// of it: they never alter the replayed book (no market impact). Passive fill
+// evidence, in order of strength:
+//   1. A trade print strictly through our price (a sell below our bid): the
+//      aggressor would have hit us first → fill up to the print's size.
+//   2. A trade print at our price: consumes the queue ahead of us; whatever
+//      exceeds it fills us (partial fills allowed).
+//   3. The opposite best quote moving through our price (fill_on_cross).
+// Depth decreases at our level not explained by trades are cancellations,
+// apportioned between the queue ahead of and behind us by QueueModel.
 class ExchangeSim {
 public:
-    // max_abs_position == 0 disables the pre-trade position risk check.
-    explicit ExchangeSim(LatencyModel latency = {},
-                         double taker_fee = 0.0004,
-                         double maker_fee = 0.0002,
-                         Qty    max_abs_position = 0);
+    struct Resting {
+        OrderRequest req;
+        Qty    filled      = 0;
+        double queue_ahead = 0.0;   // estimated displayed qty ahead of us (lots)
+        double level_qty   = 0.0;   // displayed qty at our price at the last depth update
+        double traded_since = 0.0;  // trade volume at our price since that update
+        Qty leaves() const { return req.qty - filled; }
+    };
 
-    // Submit a market order. If LatencyModel::total_us() == 0 (the default), it
-    // is matched immediately against `book` and the fill report is returned
-    // synchronously. If latency > 0, the order is queued and actually matched
-    // (against a later book state) during a subsequent on_market_event() call;
-    // this method then returns an empty vector — collect the eventual report
-    // via drain_fills() / on_market_event()'s return value instead.
-    // Rejected pre-trade (no liquidity, or would breach the position risk limit)
-    // orders are always reported synchronously, regardless of latency.
-    std::vector<ExecutionReport> submit_market_order(
-        const SimOrder&  order,
-        const OrderBook& book,
-        Portfolio&       portfolio);
+    ExchangeSim(Instrument inst, ExchangeConfig cfg = {});
 
-    // Place a passive limit order; tracked internally.
-    // Rejected (order_id 0 returned, never issued by next_order_id()) if the
-    // order would cross one of this strategy's own resting/in-flight orders,
-    // or would breach the position risk limit if it were later fully filled.
-    // Registration into the queue-position tracker is itself delayed by
-    // LatencyModel::total_us() — qty_ahead is captured from the book at
-    // arrival time, not submission time.
-    OrderId submit_limit_order(const SimOrder& order, const OrderBook& book,
-                               const Portfolio& portfolio);
+    // Order arrives at the exchange at `ts` (after entry latency), matched
+    // against the replayed book as it is at that moment.
+    void on_new_order(const OrderRequest& req, Timestamp ts, const OrderBook& book,
+                      Portfolio& pf, std::vector<ExecutionReport>& out);
+    // Cancel arrives at `ts`. If the order already filled, a CancelRejected is
+    // reported — cancel latency is a real source of adverse fills.
+    void on_cancel(OrderId id, Timestamp ts, std::vector<ExecutionReport>& out);
 
-    void cancel_order(OrderId order_id);
+    // Market data, in exchange time. `book` must already reflect `ev` for depth
+    // events (trades don't change the replayed L2 book).
+    void on_trade(const TradePrint& tr, Timestamp ts, Portfolio& pf,
+                  std::vector<ExecutionReport>& out);
+    void on_depth(const MarketEvent& ev, const OrderBook& book, Portfolio& pf,
+                  std::vector<ExecutionReport>& out);
 
-    // Call on every market event to advance passive order queue simulation
-    // and to process any pending (in-flight) orders that have now arrived.
-    std::vector<ExecutionReport> on_market_event(
-        const BinanceDepthEvent& event,
-        const OrderBook&         book,
-        Portfolio&               portfolio);
-
-    size_t active_order_count() const;   // resting passive orders only
-    OrderId next_order_id();
-
-    // Returns and clears all fills accumulated since the last call.
-    // Includes fills from submit_market_order() and passive fills.
-    std::vector<ExecutionReport> drain_fills();
+    size_t open_order_count() const { return resting_.size(); }
+    const Resting* find(OrderId id) const;
+    const std::unordered_map<OrderId, Resting>& resting() const { return resting_; }
+    const ExchangeConfig& config() const { return cfg_; }
 
 private:
-    std::vector<ExecutionReport> pending_fills_;
-    LatencyModel latency_;
-    double       taker_fee_;
-    double       maker_fee_;
-    Qty          max_abs_position_;
-    OrderId      next_id_ = 1;
-    std::unordered_map<OrderId, PassiveOrderState> passive_orders_;
-    std::vector<PendingMarketOrder> pending_market_orders_;
-    std::vector<PendingLimitOrder>  pending_limit_orders_;
+    Instrument     inst_;
+    ExchangeConfig cfg_;
+    std::unordered_map<OrderId, Resting> resting_;
+    std::unordered_map<Price, Qty> scratch_bids_, scratch_asks_;
+    std::vector<OrderId> scratch_ids_;
 
-    void advance_passive_orders(
-        const BinanceDepthEvent& event,
-        const OrderBook&         book,
-        Portfolio&               portfolio,
-        std::vector<ExecutionReport>& reports);
-
-    void process_pending_orders(
-        const BinanceDepthEvent& event,
-        const OrderBook&         book,
-        Portfolio&               portfolio,
-        std::vector<ExecutionReport>& reports);
-
-    // Matches `order` against `book` right now and returns the resulting
-    // report. Does not touch pending_fills_ — callers decide whether/when
-    // to accumulate it (immediate callers do; latency-deferred ones do too,
-    // just later).
-    ExecutionReport execute_market_order_now(
-        const SimOrder& order, const OrderBook& book, Portfolio& portfolio);
-
-    // Captures qty_ahead from `book` right now and starts tracking `order`
-    // as a resting passive order.
-    void register_passive_order_now(const SimOrder& order, const OrderBook& book);
-
-    bool would_self_cross(const SimOrder& order) const;
-    bool breaches_risk_limit(Side side, Qty qty, const Portfolio& portfolio) const;
+    void fill_passive(Resting& r, Qty qty, Price px, Timestamp ts, Portfolio& pf,
+                      std::vector<ExecutionReport>& out, FillCause cause, double queue_ahead);
+    // Sweeps the book as a taker, up to `limit` (inclusive). Returns qty filled.
+    Qty take_liquidity(const OrderRequest& req, Qty qty, Price limit, bool has_limit, Timestamp ts,
+                       const OrderBook& book, Portfolio& pf, Qty already_filled,
+                       std::vector<ExecutionReport>& out);
+    ExecutionReport base_report(const OrderRequest& req, Timestamp ts) const;
 };
