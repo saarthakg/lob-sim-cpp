@@ -383,6 +383,7 @@ RunSummary Backtester::run() {
     const int64_t feed = cfg_.latency.feed_us;
     while (src_.next(ev)) {
         pop_ns_ = mono_ns();
+        if (cfg_.measure_latency) ev.local_ns = pop_ns_;   // sources reuse the event object
         if (first) latency_from_ts_ = ev.ts + 1'000'000;   // 1 s warm-up
         if (ev.local_ns > 0 && ev.ts >= latency_from_ts_) lat_recv_.push_back(pop_ns_ - ev.local_ns);
         if (first) {

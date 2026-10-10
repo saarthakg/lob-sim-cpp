@@ -45,6 +45,9 @@ struct BacktestConfig {
     std::string    output_dir;            // empty = no files written
     bool           write_book_metrics = true;
     bool           quiet = false;
+    // Replay: stamp each event's local_ns at pop time, so engine compute
+    // (pop -> order) is measured offline exactly as on a live feed.
+    bool           measure_latency = false;
 };
 
 static constexpr int N_MARKOUTS = 6;

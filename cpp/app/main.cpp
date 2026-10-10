@@ -89,6 +89,7 @@ Output
   --output <dir>    write summary.json, fills.csv, equity.csv, book_metrics.csv
   --sample-ms N     equity/book sampling interval (default 1000)
   --no-book-metrics skip book_metrics.csv (batch sweeps: it is ~10 MB per day)
+  --measure-latency replay: time engine compute (event pop -> order) per reaction
   --quiet
 )";
 }
@@ -110,7 +111,7 @@ struct Args {
 static Args parse_args(int argc, char** argv) {
     static const std::map<std::string, bool> is_flag = {
         {"--no-cross-fill", true}, {"--no-fee-in-quotes", true}, {"--calib-log", true},
-        {"--passive", true}, {"--quiet", true}, {"--no-book-metrics", true}, {"--quote-on-book", true}, {"--synthetic-demo", true}, {"--help", true},
+        {"--passive", true}, {"--quiet", true}, {"--no-book-metrics", true}, {"--quote-on-book", true}, {"--measure-latency", true}, {"--synthetic-demo", true}, {"--help", true},
         {"-h", true}};
     Args a;
     for (int i = 1; i < argc; ++i) {
@@ -303,6 +304,7 @@ static int run_replay(EventSource& src, const Args& a) {
     cfg.quiet      = a.has("--quiet");
     cfg.sample_us  = static_cast<int64_t>(a.num("--sample-ms", 1000) * 1000);
     cfg.write_book_metrics = !a.has("--no-book-metrics");
+    cfg.measure_latency    = a.has("--measure-latency");
     cfg.exchange.fees.maker = a.num("--maker-fee-bps", 2.0) * 1e-4;
     cfg.exchange.fees.taker = a.num("--taker-fee-bps", 5.5) * 1e-4;
     std::string q = a.str("--queue", "power");
@@ -370,7 +372,7 @@ static int run_replay(EventSource& src, const Args& a) {
         std::printf("Risk   max |pos| %.4f, mean |pos| %.4f, final pos %.4f, max DD %.2f\n", s.max_abs_position,
                     s.mean_abs_position, s.final_position, s.max_drawdown);
         if (s.recv_to_engine.n) {
-            std::printf("Latency (live, local monotonic clock)\n");
+            std::printf("Latency (local monotonic clock)\n");
             print_latency("recv->engine", s.recv_to_engine);
             print_latency("tick->trade", s.tick_to_trade);
             print_latency("engine->trade", s.engine_to_trade);
