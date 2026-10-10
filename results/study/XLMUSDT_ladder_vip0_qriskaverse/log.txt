@@ -1,0 +1,13 @@
+[test] 1 parameter sets x 4 days
+       day split  params  maker_fills  taker_fills  notional  gross_pnl  fees  net_pnl  net_pnl_flat  net_bps_of_notional  edge  markout_5s  max_drawdown  max_abs_position
+2026-10-02  test default         1111            0 162581.80     -52.32 32.52   -84.83        -85.25                -5.22 15.03      -13.91         97.93           11604.0
+2026-10-03  test default          229            0  34157.85      29.47  6.83    22.63         22.45                 6.63  7.28       -4.76         11.76           10000.0
+2026-10-04  test default          262            0  40675.69     -69.09  8.14   -77.22        -78.59               -18.98  7.44       -3.40         86.46           11424.0
+2026-10-05  test default         1022            0 149898.57      -3.37 29.98   -33.35        -34.67                -2.23 25.88       -7.23        103.04           11787.0
+
+Test-day net PnL by parameter set: mean / std / % days positive / total
+          mean   std  pct_pos   total
+params                               
+default -43.19  49.4     25.0 -172.77
+
+wrote /Users/saarthakgupta/code/Finance Project/lob-sim-cpp/results/study/XLMUSDT_ladder_vip0_qriskaverse/results.csv
