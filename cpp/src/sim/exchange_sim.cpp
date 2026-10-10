@@ -25,6 +25,25 @@ double QueueModel::prob_behind(double front, double back) const {
 ExchangeSim::ExchangeSim(Instrument inst, ExchangeConfig cfg)
     : inst_(std::move(inst)), cfg_(cfg) {}
 
+void ExchangeSim::on_market(const MarketEvent& ev, const OrderBook& book, Portfolio& pf,
+                            std::vector<ExecutionReport>& out) {
+    if (ev.type == EventType::Trade) on_trade(ev.trade, ev.ts, pf, out);
+    else if (!book.empty() && !book.crossed()) on_depth(ev, book, pf, out);
+}
+
+double ExchangeSim::queue_ahead(OrderId id) const {
+    const Resting* r = find(id);
+    return r ? r->queue_ahead : -1.0;
+}
+
+void ExchangeSim::resting_sides(bool& has_bid, bool& has_ask) const {
+    has_bid = has_ask = false;
+    for (const auto& [id, rs] : resting_) {
+        (void)id;
+        (rs.req.side == Side::Bid ? has_bid : has_ask) = true;
+    }
+}
+
 const ExchangeSim::Resting* ExchangeSim::find(OrderId id) const {
     auto it = resting_.find(id);
     return it == resting_.end() ? nullptr : &it->second;

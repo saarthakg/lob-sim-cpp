@@ -49,15 +49,12 @@ struct Backtester::Writers {
 
 Backtester::Backtester(EventSource& source, Strategy& strategy, BacktestConfig cfg)
     : src_(source), strat_(strategy), cfg_(std::move(cfg)), inst_(source.instrument()),
-      exch_(source.instrument(), cfg_.exchange), pf_(source.instrument()),
-      rng_(cfg_.latency.seed), w_(std::make_unique<Writers>()) {
+      pf_(source.instrument()), rng_(cfg_.latency.seed), w_(std::make_unique<Writers>()) {
     px_prec_ = std::max(0, static_cast<int>(std::ceil(-std::log10(inst_.tick_size) - 1e-9)));
     // Without a trade feed, the only fill evidence is the book crossing our
     // price — force that on so a depth-only replay can fill at all.
-    if (!src_.has_trades() && !cfg_.exchange.fill_on_cross) {
-        cfg_.exchange.fill_on_cross = true;
-        exch_ = ExchangeSim(inst_, cfg_.exchange);
-    }
+    if (!src_.has_trades()) cfg_.exchange.fill_on_cross = true;
+    exch_ = std::make_unique<ExchangeSim>(inst_, cfg_.exchange);
 }
 
 Backtester::~Backtester() = default;
@@ -151,7 +148,8 @@ void Backtester::cancel(OrderId id) {
 void Backtester::handle_exchange_reports(Timestamp t) {
     for (const auto& rep : scratch_reports_) {
         if (rep.status == OrderStatus::New) {
-            if (const auto* rs = exch_.find(rep.order_id)) queue_at_entry_[rep.order_id] = rs->queue_ahead;
+            const double q = exch_->queue_ahead(rep.order_id);
+            if (q >= 0.0) queue_at_entry_[rep.order_id] = q;
         }
         if (rep.fill_qty > 0) record_fill(rep);
         Timestamp arrive = std::max(t + jittered(cfg_.latency.response_us), last_resp_arrival_);
@@ -214,8 +212,8 @@ void Backtester::drain_until(Timestamp t, bool inclusive) {
             OrderMsg m = to_exchange_.front();
             to_exchange_.pop_front();
             ex_now_ = m.t;
-            if (m.is_cancel) exch_.on_cancel(m.req.order_id, m.t, scratch_reports_);
-            else             exch_.on_new_order(m.req, m.t, ex_book_, pf_, scratch_reports_);
+            if (m.is_cancel) exch_->on_cancel(m.req.order_id, m.t, scratch_reports_);
+            else             exch_->on_new_order(m.req, m.t, ex_book_, pf_, scratch_reports_);
             handle_exchange_reports(m.t);
         } else if (t_rp == tmin) {
             ReportMsg m = to_strategy_.front();
@@ -238,13 +236,11 @@ void Backtester::exchange_process(const MarketEvent& ev) {
     if (ev.type == EventType::Trade) {
         ++sum_.trade_events;
         (ev.trade.aggressor == Side::Bid ? w_->buy_vol : w_->sell_vol) += inst_.qty(ev.trade.qty);
-        exch_.on_trade(ev.trade, ev.ts, pf_, scratch_reports_);
+        exch_->on_market(ev, ex_book_, pf_, scratch_reports_);
     } else {
         apply_to_book(ex_book_, ev);
-        if (!ex_book_.empty() && !ex_book_.crossed()) {
-            exch_.on_depth(ev, ex_book_, pf_, scratch_reports_);
-            update_markouts();
-        }
+        exch_->on_market(ev, ex_book_, pf_, scratch_reports_);
+        if (!ex_book_.empty() && !ex_book_.crossed()) update_markouts();
     }
     handle_exchange_reports(ev.ts);
 }
@@ -294,10 +290,7 @@ void Backtester::sample(Timestamp t) {
     abs_pos_acc_ += abs_pos;
     sum_.max_abs_position = std::max(sum_.max_abs_position, abs_pos);
     bool has_bid = false, has_ask = false;
-    for (const auto& [id, rs] : exch_.resting()) {
-        (void)id;
-        (rs.req.side == Side::Bid ? has_bid : has_ask) = true;
-    }
+    exch_->resting_sides(has_bid, has_ask);
     bid_up_ += has_bid;
     ask_up_ += has_ask;
     ++samples_;
@@ -307,7 +300,7 @@ void Backtester::sample(Timestamp t) {
             std::to_string(t), fmt(mid * inst_.tick_size, px_prec_),
             fmt(pf_.position_units(), 6), fmt(pf_.realized_pnl(), 4), fmt(pf_.unrealized_pnl(mid), 4),
             fmt(pf_.total_pnl(mid), 4), fmt(pf_.total_fees_paid(), 4), fmt(net, 4),
-            std::to_string(fills_.size()), std::to_string(exch_.open_order_count())});
+            std::to_string(fills_.size()), std::to_string(exch_->open_order_count())});
     }
     if (w_->book) {
         auto bb = ex_book_.best_bid();

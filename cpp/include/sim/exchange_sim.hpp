@@ -1,9 +1,5 @@
 #pragma once
-#include "../core/order_book.hpp"
-#include "../marketdata/market_event.hpp"
-#include "execution_report.hpp"
-#include "portfolio.hpp"
-#include "sim_order.hpp"
+#include "exchange.hpp"
 #include <unordered_map>
 #include <vector>
 
@@ -51,7 +47,7 @@ struct ExchangeConfig {
 //   3. The opposite best quote moving through our price (fill_on_cross).
 // Depth decreases at our level not explained by trades are cancellations,
 // apportioned between the queue ahead of and behind us by QueueModel.
-class ExchangeSim {
+class ExchangeSim : public Exchange {
 public:
     struct Resting {
         OrderRequest req;
@@ -67,10 +63,15 @@ public:
     // Order arrives at the exchange at `ts` (after entry latency), matched
     // against the replayed book as it is at that moment.
     void on_new_order(const OrderRequest& req, Timestamp ts, const OrderBook& book,
-                      Portfolio& pf, std::vector<ExecutionReport>& out);
+                      Portfolio& pf, std::vector<ExecutionReport>& out) override;
     // Cancel arrives at `ts`. If the order already filled, a CancelRejected is
     // reported — cancel latency is a real source of adverse fills.
-    void on_cancel(OrderId id, Timestamp ts, std::vector<ExecutionReport>& out);
+    void on_cancel(OrderId id, Timestamp ts, std::vector<ExecutionReport>& out) override;
+
+    // Dispatches to on_trade / on_depth; depth is skipped on an empty or
+    // (transiently) crossed book.
+    void on_market(const MarketEvent& ev, const OrderBook& book, Portfolio& pf,
+                   std::vector<ExecutionReport>& out) override;
 
     // Market data, in exchange time. `book` must already reflect `ev` for depth
     // events (trades don't change the replayed L2 book).
@@ -79,7 +80,9 @@ public:
     void on_depth(const MarketEvent& ev, const OrderBook& book, Portfolio& pf,
                   std::vector<ExecutionReport>& out);
 
-    size_t open_order_count() const { return resting_.size(); }
+    size_t open_order_count() const override { return resting_.size(); }
+    double queue_ahead(OrderId id) const override;
+    void   resting_sides(bool& has_bid, bool& has_ask) const override;
     const Resting* find(OrderId id) const;
     const std::unordered_map<OrderId, Resting>& resting() const { return resting_; }
     const ExchangeConfig& config() const { return cfg_; }

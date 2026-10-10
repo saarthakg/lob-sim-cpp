@@ -137,7 +137,7 @@ private:
 
     OrderBook   ex_book_;      // exchange-time book
     OrderBook   local_book_;   // what the strategy sees (feed-delayed)
-    ExchangeSim exch_;
+    std::unique_ptr<Exchange> exch_;
     Portfolio   pf_;           // ground-truth accounting at exchange time
 
     int       px_prec_   = 2;   // decimals needed to print a price exactly
