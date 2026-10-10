@@ -9,7 +9,7 @@ itself. It runs entirely on **free public data**.
 | | |
 |---|---|
 | **Speed** | Order-level (L3) book at **50M msgs/s, 18 ns p50 / 46 ns p99 per operation**, 5× a `std::map`/`std::list` book. **Live tick-to-trade of 8.2 µs p50 / 22 µs p99** on Bybit's real-time feed (WebSocket thread → lock-free ring → engine). A full day of BTCUSDT replays in about 2.5 s straight from compressed exchange archives. |
-| **Fidelity** | On order-level data, our simulated orders sit in the **real FIFO queue**. Against independent L3 ground truth the exact-queue exchange matches real fills with 0.995 accuracy and 1.000 precision. On L2-only data, a queue model is used instead; it is calibrated against the same ground truth (fill rates within 4%). Feed, order-entry and response latency are modelled separately, so stale quotes really do get picked off. |
+| **Fidelity** | On order-level data, our simulated orders sit in the **real FIFO queue**. Against independent L3 ground truth the exact-queue exchange matches real fills with 0.996 accuracy and 1.000 precision. On L2-only data, a queue model is used instead; it is calibrated against the same ground truth (fill rates within 3%). Feed, order-entry and response latency are modelled separately, so stale quotes really do get picked off. |
 | **Rigour** | Walk-forward parameter selection; 16 out-of-sample days; sensitivity sweeps over latency, queue model and fill rule; and a **pre-registered** confirmation test on 30 untouched days. |
 
 **What the platform found** ([Results](#results)):
@@ -118,7 +118,7 @@ cancel, executes and sweeps; ~20k resting orders; Apple M-series):
   feed; `lob_sim --convert-bitstamp-l3` turns it into a fixed-record binary
   format (`.l3bin`).
 - `lob_sim --replay-l3` replays it.
-- 70 minutes of BTC/USD (472k events) replays at **21M records/s**, with zero
+- 150 minutes of BTC/USD (954k events) replays at **24M records/s**, with zero
   unknown order references.
 
 **Exact-queue exchange.** On `.l3bin` data the backtester uses
@@ -128,14 +128,26 @@ print fills us exactly when the matching engine would have reached our order
 before the real maker. Scored against the independent L3 ground truth
 (`python/analysis/queue_model_validation.py`):
 
-| BTC/USD, 60 s horizon (58% of fills queue-driven) | Fill rate (true 0.296) | Accuracy | Precision |
+| BTC/USD, 60 s horizon (63% of fills queue-driven) | Fill rate (true 0.305) | Accuracy | Precision |
 |---|---|---|---|
-| **Exact-queue L3 exchange** | **0.291** | **0.995** | **1.000** |
-| Best L2 queue model (Power-2) | 0.284 | 0.959 | 0.949 |
-| Log queue model | 0.387 | 0.879 | 0.726 |
+| **Exact-queue L3 exchange** | **0.300** | **0.996** | **1.000** |
+| Best L2 queue model (Power-2) | 0.296 | 0.965 | 0.957 |
+| Log queue model | 0.392 | 0.889 | 0.747 |
 
 Every strategy runs unchanged on both data paths, and `--exchange-model l2`
-scores the queue model on the same L3 market for a direct comparison.
+scores the queue model on the same L3 market for a direct comparison
+([results/l2_vs_l3/COMPARISON.md](results/l2_vs_l3/COMPARISON.md)). Running
+naive, ladder and GLFT strategies on 150 minutes of Bitstamp BTC, ETH and XRP
+under both exchanges:
+
+- **Fill counts.** The queue model's fills are −4% to +48% off the
+  exact-queue fills. XRP touch-joining strategies are over-filled by about
+  45%.
+- **Gross edge.** It is misstated by up to 0.8–1.5 bp in either direction,
+  the same order of magnitude as maker fees and as the edge being measured.
+- **What survives.** Every configuration is negative under both exchanges, so
+  the conclusions hold. But the size of a market maker's edge can only be
+  trusted with exact queue priority.
 
 ---
 
@@ -466,29 +478,31 @@ require accounts.
 under each queue model, on the 100 ms-conflated L2+trades view of the same
 market and scores each model's fills against the truth.
 
-**Data.** 70 minutes of BTC/USD, ETH/USD and XRP/USD: 1,666 probes per pair,
+**Data.** 150 minutes of BTC/USD, ETH/USD and XRP/USD: 3,598 probes per pair,
 scored at 5, 15 and 60 s horizons
 ([results/queue_validation/VALIDATION.md](results/queue_validation/VALIDATION.md)).
 
-**BTC/USD is where the queue model matters**: 58% of true 60 s fills are
+**BTC/USD is where the queue model matters**: 63% of true 60 s fills are
 queue-driven, meaning prints at the probe's own price after the queue ahead
 was consumed.
 
-| Model (BTC/USD, 60 s) | Simulated fill rate (true: 0.296) | Accuracy | Precision |
+| Model (BTC/USD, 60 s) | Simulated fill rate (true: 0.305) | Accuracy | Precision |
 |---|---|---|---|
-| Power-2 (default) | 0.284 | 0.959 | 0.949 |
-| Power-3 | 0.291 | 0.960 | 0.939 |
-| RiskAverse | 0.269 | 0.973 | 1.000 |
-| **Log** | **0.387 (+31%)** | **0.879** | **0.726** |
-| Power-2 without cross-fills | 0.281 | 0.956 | 0.948 |
+| Exact-queue L3 exchange (order-level replay) | 0.300 | 0.996 | 1.000 |
+| Power-2 (default) | 0.296 | 0.965 | 0.957 |
+| Power-3 | 0.297 | 0.965 | 0.953 |
+| RiskAverse | 0.277 | 0.972 | 1.000 |
+| **Log** | **0.392 (+29%)** | **0.889** | **0.747** |
+| Power-2 without cross-fills | 0.291 | 0.960 | 0.956 |
 
 **On ETH/USD and XRP/USD** almost every true fill comes from price moving
-through the probe. Every model scores 0.997–1.000 accuracy, *except* the
-no-cross-fill variant, which misses 44–84% of real fills.
+through the probe. Every model scores 0.994–1.000 accuracy, *except* the
+no-cross-fill variant, which misses 41–49% of real 60 s fills, and more at
+shorter horizons.
 
 Two conclusions:
 
-1. **The Log queue model over-fills by about 31% against ground truth.** It
+1. **The Log queue model over-fills by about 29% against ground truth.** It
    was the only assumption under which the XLM and ATOM ladders turned
    positive in the sensitivity study, so that result is not credible. The
    default Power-2 model is well calibrated.
