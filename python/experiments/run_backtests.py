@@ -54,7 +54,7 @@ def run_one(job: dict) -> dict:
         cmd = [str(BIN), "--replay", str(job["book"]), "--strategy", job["strategy"],
                # Sweeps only need summary.json/fills.csv; per-second samples
                # across thousands of runs filled ~90 GB of disk.
-               "--output", str(out), "--quiet", "--sample-ms", "60000", "--no-book-metrics"]
+               "--output", str(out), "--quiet", "--sample-ms", "10000", "--no-book-metrics"]
         if job["trades"]:
             cmd += ["--trades", str(job["trades"])]
         cmd += job["args"]
