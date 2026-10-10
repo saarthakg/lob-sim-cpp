@@ -170,7 +170,10 @@ void Backtester::cancel(OrderId id) {
 }
 
 void Backtester::note_submit() {
-    if (react_ns_ > 0) lat_t2t_.push_back(mono_ns() - react_ns_);
+    if (react_ns_ <= 0) return;
+    const int64_t now = mono_ns();
+    lat_t2t_.push_back(now - react_ns_);
+    lat_e2t_.push_back(now - react_pop_ns_);
 }
 
 // ── event plumbing ───────────────────────────────────────────────────────────
@@ -220,8 +223,10 @@ void Backtester::deliver_report(const ExecutionReport& rep) {
 void Backtester::deliver_local(const MarketEvent& ev, Timestamp local_t) {
     local_now_ = local_t;
     apply_to_book(local_book_, ev);
-    // Orders sent from these callbacks are reactions to `ev`: time them.
-    react_ns_ = ev.local_ns;
+    // Orders sent from these callbacks are reactions to `ev`: time them
+    // (after the warm-up, so the backlog queued during start-up doesn't count).
+    react_ns_     = (ev.local_ns > 0 && ev.ts >= latency_from_ts_) ? ev.local_ns : 0;
+    react_pop_ns_ = pop_ns_;
     if (ev.type == EventType::Trade) {
         strat_.on_trade(*this, ev.trade);
     } else if (!local_book_.empty() && !local_book_.crossed()) {
@@ -377,7 +382,9 @@ RunSummary Backtester::run() {
     bool first = true;
     const int64_t feed = cfg_.latency.feed_us;
     while (src_.next(ev)) {
-        if (ev.local_ns > 0) lat_recv_.push_back(mono_ns() - ev.local_ns);
+        pop_ns_ = mono_ns();
+        if (first) latency_from_ts_ = ev.ts + 1'000'000;   // 1 s warm-up
+        if (ev.local_ns > 0 && ev.ts >= latency_from_ts_) lat_recv_.push_back(pop_ns_ - ev.local_ns);
         if (first) {
             first = false;
             sum_.start_ts = ev.ts;
@@ -443,6 +450,7 @@ void Backtester::finalize() {
     sum_.net_pnl_flat = sum_.net_pnl - sum_.flatten_cost;
     sum_.recv_to_engine = percentiles(lat_recv_);
     sum_.tick_to_trade  = percentiles(lat_t2t_);
+    sum_.engine_to_trade = percentiles(lat_e2t_);
     if (samples_ > 0) {
         sum_.mean_abs_position = abs_pos_acc_ / static_cast<double>(samples_);
         sum_.uptime_bid = static_cast<double>(bid_up_) / static_cast<double>(samples_);
@@ -516,5 +524,6 @@ void Backtester::write_summary_json(const RunSummary& s, const std::string& path
     };
     if (s.recv_to_engine.n) j["latency"]["recv_to_engine"] = pj(s.recv_to_engine);
     if (s.tick_to_trade.n)  j["latency"]["tick_to_trade"]  = pj(s.tick_to_trade);
+    if (s.engine_to_trade.n) j["latency"]["engine_to_trade"] = pj(s.engine_to_trade);
     std::ofstream(path) << j.dump(2) << "\n";
 }

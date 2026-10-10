@@ -189,18 +189,22 @@ TEST_CASE("Live latency instrumentation counts reactions, not timer or replay ev
         return std::chrono::duration_cast<std::chrono::nanoseconds>(
                    std::chrono::steady_clock::now().time_since_epoch()).count();
     };
-    std::vector<MarketEvent> evs = {snapshot(0, 1000, 1001), snapshot(1000, 1000, 1001), snapshot(2000, 1000, 1001)};
+    // Exchange timestamps past the 1 s warm-up window, which is excluded.
+    std::vector<MarketEvent> evs = {snapshot(0, 1000, 1001), snapshot(2'000'000, 1000, 1001),
+                                    snapshot(3'000'000, 1000, 1001), snapshot(4'000'000, 1000, 1001)};
     for (auto& e : evs) e.local_ns = now_ns();   // as a live feed would stamp them
     VectorSource src(inst(), evs);
     Probe p;
     p.on_book_fn = [](StrategyContext& c, int n) {
-        if (n == 0) c.submit_limit(Side::Bid, 999, 1);     // reaction to event 0
-        if (n == 1) for (auto& [id, o] : c.orders()) c.cancel(id);   // reaction to event 1
+        if (n == 0) c.submit_limit(Side::Bid, 998, 1);     // during warm-up: not counted
+        if (n == 1) c.submit_limit(Side::Bid, 999, 1);     // reaction to event 1
+        if (n == 2) for (auto& [id, o] : c.orders()) c.cancel(id);   // reactions to event 2
     };
     Backtester bt(src, p, quiet_cfg());
     auto s = bt.run();
     REQUIRE(s.recv_to_engine.n == 3);
-    REQUIRE(s.tick_to_trade.n == 2);
+    REQUIRE(s.tick_to_trade.n == 3);                    // 1 order + 2 cancels after warm-up
+    REQUIRE(s.engine_to_trade.n == 3);
     REQUIRE(s.tick_to_trade.p50 > 0);
 
     // Replay data (local_ns == 0) records nothing.

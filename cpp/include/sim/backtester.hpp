@@ -102,6 +102,7 @@ struct RunSummary {
     struct Pctl { size_t n = 0; double p50 = 0, p90 = 0, p99 = 0, p999 = 0, max = 0; };
     Pctl recv_to_engine;   // message received -> event popped by the engine thread
     Pctl tick_to_trade;    // message received -> order/cancel sent in reaction to it
+    Pctl engine_to_trade;  // event popped -> order/cancel sent (engine + strategy compute only)
 };
 
 class Backtester : private StrategyContext {
@@ -169,7 +170,10 @@ private:
 
     std::vector<ExecutionReport> scratch_reports_;
     int64_t react_ns_ = 0;                         // receive time of the event being reacted to
-    std::vector<int64_t> lat_recv_, lat_t2t_;
+    int64_t react_pop_ns_ = 0;                     // when the engine popped that event
+    int64_t pop_ns_ = 0;                           // pop time of the current source event
+    int64_t latency_from_ts_ = 0;                  // exchange time after which samples count (warm-up)
+    std::vector<int64_t> lat_recv_, lat_t2t_, lat_e2t_;
     void note_submit();
     std::vector<FillRecord> fills_;
     std::array<size_t, N_MARKOUTS> markout_cursor_{};
