@@ -1,6 +1,7 @@
 #include "../include/core/l3_book.hpp"
 #include "../include/core/order_book.hpp"
 #include "../include/live/live_bybit_source.hpp"
+#include "../include/marketdata/itch_book_builder.hpp"
 #include "../include/marketdata/l3_format.hpp"
 #include "../include/marketdata/event_source.hpp"
 #include "../include/marketdata/parser.hpp"
@@ -15,6 +16,7 @@
 #include "live_capture.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <ctime>
@@ -48,6 +50,10 @@ Modes
   --convert-bitstamp-l3 <capture.l3.jsonl> --output <file.l3bin>
         Convert an order-level capture (python/data/capture_bitstamp_l3.py)
         to the binary L3 replay format.
+  --replay-itch <NASDAQ_ITCH50 file | .gz> [--snapshot-time HH:MM:SS --symbols AAPL,MSFT]
+        Replay a Nasdaq TotalView-ITCH 5.0 day into per-symbol order-level
+        books (.gz is streamed through gzip). Reports compute (decode + book)
+        and I/O time separately.
   --replay-l3 <file.l3bin>
         Replay an L3 file through the order-level book: throughput and
         consistency checks.
@@ -443,6 +449,112 @@ static int run_replay_l3(const std::string& path) {
     return 0;
 }
 
+// ── Nasdaq ITCH 5.0 replay ───────────────────────────────────────────────────
+
+namespace {
+// Wraps ItchBookBuilder to print chosen symbols' books at a time of day.
+struct ItchSnapshotter {
+    ItchBookBuilder& b;
+    uint64_t at_ns;
+    std::vector<std::string> symbols;
+    bool done = false;
+
+    void maybe(uint64_t ts) {
+        if (done || at_ns == 0 || ts < at_ns) return;
+        done = true;
+        std::printf("\nBook snapshot at %02llu:%02llu:%02llu (top 5 levels, displayed shares):\n",
+                    (unsigned long long)(at_ns / 3600000000000ULL), (unsigned long long)(at_ns / 60000000000ULL % 60),
+                    (unsigned long long)(at_ns / 1000000000ULL % 60));
+        for (const auto& sym : symbols) {
+            int loc = b.find_symbol(sym);
+            const L3Book* bk = loc >= 0 ? b.book(static_cast<uint16_t>(loc)) : nullptr;
+            if (!bk || bk->empty(Side::Bid) || bk->empty(Side::Ask)) { std::printf("  %-6s (no two-sided book)\n", sym.c_str()); continue; }
+            std::vector<Level> bids, asks;
+            bk->top_levels(Side::Bid, 5, bids);
+            bk->top_levels(Side::Ask, 5, asks);
+            std::printf("  %-6s %zu orders | bid %.4f x %lld (%u orders) | ask %.4f x %lld (%u orders)\n", sym.c_str(),
+                        bk->order_count(), ItchBookBuilder::to_usd(bids[0].price), (long long)bids[0].qty,
+                        bk->level_orders(Side::Bid, bids[0].price), ItchBookBuilder::to_usd(asks[0].price), (long long)asks[0].qty,
+                        bk->level_orders(Side::Ask, asks[0].price));
+            for (size_t i = 0; i < 5; ++i) {
+                std::printf("         ");
+                if (i < bids.size()) std::printf("%10.4f %8lld", ItchBookBuilder::to_usd(bids[i].price), (long long)bids[i].qty);
+                else std::printf("%19s", "");
+                if (i < asks.size()) std::printf("   |  %10.4f %8lld", ItchBookBuilder::to_usd(asks[i].price), (long long)asks[i].qty);
+                std::printf("\n");
+            }
+        }
+        std::printf("\n");
+    }
+    void on_add(uint16_t l, uint64_t ts, uint64_t r, uint8_t s, uint32_t q, uint32_t p) { maybe(ts); b.on_add(l, ts, r, s, q, p); }
+    void on_execute(uint16_t l, uint64_t ts, uint64_t r, uint32_t q) { b.on_execute(l, ts, r, q); }
+    void on_cancel(uint16_t l, uint64_t ts, uint64_t r, uint32_t q) { b.on_cancel(l, ts, r, q); }
+    void on_delete(uint16_t l, uint64_t ts, uint64_t r) { b.on_delete(l, ts, r); }
+    void on_replace(uint16_t l, uint64_t ts, uint64_t o, uint64_t n, uint32_t q, uint32_t p) { b.on_replace(l, ts, o, n, q, p); }
+    void on_directory(uint16_t l, const char* s) { b.on_directory(l, s); }
+    void on_hidden_trade(uint16_t l, uint64_t ts, uint32_t q, uint32_t p) { b.on_hidden_trade(l, ts, q, p); }
+    void on_message(uint8_t t) { b.on_message(t); }
+};
+}  // namespace
+
+static int run_replay_itch(const std::string& path, const Args& a) {
+    ItchBookBuilder builder;
+    ItchSnapshotter snap{builder, 0, {}};
+    if (a.has("--snapshot-time")) {
+        unsigned h = 0, m = 0, sec = 0;
+        std::sscanf(a.str("--snapshot-time").c_str(), "%u:%u:%u", &h, &m, &sec);
+        snap.at_ns = (h * 3600ULL + m * 60ULL + sec) * 1000000000ULL;
+        std::string list = a.str("--symbols", "AAPL,MSFT,AMZN,TSLA,QQQ");
+        for (size_t st = 0;;) {
+            size_t c = list.find(',', st);
+            snap.symbols.push_back(list.substr(st, c == std::string::npos ? std::string::npos : c - st));
+            if (c == std::string::npos) break;
+            st = c + 1;
+        }
+    }
+    // Read in large chunks and time I/O (disk, or gzip for .gz) separately
+    // from compute (ITCH decode + book updates): a full day is ~8 GB, more
+    // than stays in a laptop's page cache, so end-to-end time is mostly disk.
+    const bool gz = path.size() > 3 && path.compare(path.size() - 3, 3, ".gz") == 0;
+    FILE* fp = gz ? ::popen(("gzip -dc '" + path + "'").c_str(), "r") : std::fopen(path.c_str(), "rb");
+    if (!fp) { std::cerr << "cannot open " << path << "\n"; return 1; }
+    std::vector<uint8_t> buf(256 << 20);
+    size_t have = 0;
+    double gb = 0, io_s = 0, cpu_s = 0;
+    auto now = [] { return std::chrono::steady_clock::now(); };
+    while (true) {
+        auto t0 = now();
+        const size_t got = std::fread(buf.data() + have, 1, buf.size() - have, fp);
+        auto t1 = now();
+        io_s += std::chrono::duration<double>(t1 - t0).count();
+        if (got == 0) break;
+        have += got;
+        gb += static_cast<double>(got) / 1e9;
+        const size_t used = snap.at_ns ? itch::parse_itch(buf.data(), have, snap)
+                                       : itch::parse_itch(buf.data(), have, builder);
+        std::memmove(buf.data(), buf.data() + used, have - used);
+        have -= used;
+        cpu_s += std::chrono::duration<double>(now() - t1).count();
+    }
+    if (gz) ::pclose(fp); else std::fclose(fp);
+    const auto& s = builder.stats();
+    const double msgs = static_cast<double>(std::max<uint64_t>(s.messages, 1));
+    std::printf("ITCH 5.0 replay %s (%s)\n", path.c_str(), gz ? "streamed through gzip" : "read from disk");
+    std::printf("  %.2f GB, %llu messages\n", gb, (unsigned long long)s.messages);
+    std::printf("  compute (decode + book updates): %.2f s -> %.1f M msgs/s (%.1f ns/msg)\n", cpu_s,
+                msgs / cpu_s / 1e6, cpu_s * 1e9 / msgs);
+    std::printf("  %s: %.2f s; end to end %.2f s -> %.1f M msgs/s\n", gz ? "decompression" : "disk reads", io_s,
+                io_s + cpu_s, msgs / (io_s + cpu_s) / 1e6);
+    std::printf("  order messages: add %llu, execute %llu, cancel %llu, delete %llu, replace %llu; hidden trades %llu\n",
+                (unsigned long long)s.adds, (unsigned long long)s.executes, (unsigned long long)s.cancels,
+                (unsigned long long)s.deletes, (unsigned long long)s.replaces, (unsigned long long)s.hidden_trades);
+    std::printf("  books: %zu symbols, %zu orders resting at end of feed\n", builder.book_count(), builder.resting_orders());
+    std::printf("  consistency: unknown refs %llu, duplicate adds %llu, over-executions %llu, sub-penny prices >= $1 %llu\n",
+                (unsigned long long)s.unknown_ref, (unsigned long long)s.duplicate_add,
+                (unsigned long long)s.over_execute, (unsigned long long)s.subpenny_violations);
+    return 0;
+}
+
 // ── misc modes ───────────────────────────────────────────────────────────────
 
 static void run_load_snapshot(const std::string& path) {
@@ -475,6 +587,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (a.has("--replay-l3")) return run_replay_l3(a.str("--replay-l3"));
+        if (a.has("--replay-itch")) return run_replay_itch(a.str("--replay-itch"), a);
         if (a.has("--live-capture")) {
             if (!a.has("--output")) { std::cerr << "--live-capture requires --output <csv>\n"; return 1; }
             run_live_capture(a.str("--live-capture"), static_cast<int>(a.num("--duration-minutes", 60)),
