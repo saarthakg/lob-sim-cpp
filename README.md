@@ -1,333 +1,498 @@
 # lob-sim-cpp
 
-A C++ event-driven **L2 limit order book replay and execution simulator** built around the Binance diff-depth WebSocket protocol, with live market data capture via Bybit.
+A **C++ limit-order-book engine and market-making research platform**:
+event-driven replay of full exchange order books, a matching simulator with an
+explicit queue-position model and three latency channels, literature-based
+market-making strategies, and a research workflow built so it can't fool
+itself. It runs entirely on **free public data**.
+
+| | |
+|---|---|
+| **Speed** | Book updates at 12–16M events/s; backtest loop with a strategy at 1.7–2.2M events/s. A full day of BTCUSDT (860k book updates, 320k trades) replays in about 2.5 s, streamed straight from compressed exchange archives. |
+| **Fidelity** | Fills come from trade prints and queue position, not price touches. The fill model is **validated against order-level (L3) ground truth**: the default queue model predicts real fill rates within 4% on BTC/USD. Feed, order-entry and response latency are modelled separately, so stale quotes really do get picked off. |
+| **Rigour** | Walk-forward parameter selection; 16 out-of-sample days; sensitivity sweeps over latency, queue model and fill rule; and a **pre-registered** confirmation test on 30 untouched days. |
+
+**What the platform found** ([Results](#results)):
+
+- **The strategies work as designed and the research features pay off.**
+  GLFT and a queue-priority ladder, with an out-of-sample-fitted book-imbalance
+  alpha and a trade-driven depletion guard, cut losses 85–99% versus naive
+  quoting. They also raise the spread captured at fill from negative to
+  +0.5–7 bp.
+- **The imbalance signal is real.** Correlation with 1–5 s returns is 0.13–0.34
+  out of sample, and on BTC it is profitable before costs when trading on it as a
+  taker.
+- **Passive execution beats crossing the spread** by 1.8 bp per parent order,
+  on every test day.
+- **Retail-latency market making is still not profitable.** Adverse selection
+  outweighs the spread captured at every fee tier tested, including a maker
+  rebate. The platform quantifies the gap: how much edge, how fast a reaction
+  and what fee tier it would take.
+- **A promising pattern failed its pre-registered test.** This is exactly
+  the kind of false positive the workflow is built to catch.
+
+> The pre-overhaul version of this README reported market-making profits. Those
+> came from a fill model that could not fill a resting order honestly, a
+> replay that began from an empty book, and Binance "bookDepth" files that are
+> not order-book data at all. See [What changed](#what-changed-and-why) for
+> the full list.
 
 ---
 
-## Features
+## Contents
 
-- **L2 Order Book** — integer-tick `std::map<Price, Qty>` with O(log N) updates
-- **Binance sync algorithm** — exact snapshot + diff-depth state machine per the official Binance docs
-- **Live capture** — connects to Bybit WebSocket, syncs the book, records to normalized CSV
-- **Replay engine** — reads normalized `depth_events.csv`, fires per-event callbacks
-- **Execution simulator** — market orders walk the full visible book depth; passive limit orders approximate queue position from L2 data, filling only on activity at their own price level
-- **Pre-trade risk controls** — self-crossing prevention and an optional max-position limit, both enforced at order entry
-- **Latency model** — order arrival is genuinely delayed by `market_data_us + decision_us + order_entry_us`, matched against the book state as of arrival, not decision time
-- **Three strategies** — Market Maker (tick-size-aware, inventory-skewed quoting), Imbalance (signal-triggered aggressive), and TWAP (scheduled slice execution)
-- **Structured CSV exports** — `book_metrics.csv`, `fills.csv` (with a real `order_type` column), `pnl.csv`
-- **Python analytics** — pandas + matplotlib scripts for PnL, fill quality, markout, latency sensitivity, and a Sharpe/drawdown/win-rate performance report
-- **Unit tests** — Catch2, 154 assertions across 45 test cases
-- **Benchmarked** — ~6.0M events/sec (book only, std::map), ~2.3M events/sec (with MarketMaker strategy)
+- [Quickstart](#quickstart)
+- [How the simulator works](#how-the-simulator-works)
+- [Strategies](#strategies)
+- [Research workflow](#research-workflow)
+- [Results](#results)
+- [What changed and why](#what-changed-and-why)
+- [Limitations](#limitations)
+- [Sources](#sources)
 
 ---
 
 ## Quickstart
 
-### Prerequisites
-
 ```bash
-brew install cmake ninja       # macOS
-# sudo apt install cmake ninja-build   # Ubuntu
-```
-
-Requires macOS with Xcode Command Line Tools, or Linux with GCC/Clang 14+.
-
-### Build
-
-```bash
-git clone <repo>
-cd lob-sim-cpp
+# build (macOS: if the system CLT is broken, use Homebrew LLVM — see docs/architecture.md)
 cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
-cmake --build build -j$(nproc)
+cmake --build build -j
+./build/lob_tests                                   # 59 test cases
+
+# data: one day of Bybit BTCUSDT book (~200 MB) + trades (~12 MB)
+python3 -m venv python/.venv && python/.venv/bin/python -m pip install -r python/requirements.txt
+python/.venv/bin/python python/data/download_bybit.py --symbol BTCUSDT --start 2026-10-03 --end 2026-10-03
+
+# profile the market: spread distribution and whether passive quoting can pay its fees
+./build/lob_sim --stats data/raw/bybit/2026-10-03_BTCUSDT_ob200.data.zip \
+                --trades data/raw/bybit/BTCUSDT2026-10-03.csv.gz
+
+# backtest the GLFT market maker with a 5 ms one-way latency
+./build/lob_sim --replay data/raw/bybit/2026-10-03_BTCUSDT_ob200.data.zip \
+                --trades data/raw/bybit/BTCUSDT2026-10-03.csv.gz \
+                --strategy glft --order-size 0.01 --max-position 0.1 \
+                --latency-us 5000 --output data/processed/glft_demo
+python/.venv/bin/python python/analysis/run_report.py --run data/processed/glft_demo --save
 ```
 
-### Run tests
-
-```bash
-./build/lob_tests
-# All tests passed (166 assertions in 49 test cases)
-```
-
-### Synthetic demo
-
-```bash
-./build/lob_sim --synthetic-demo
-```
-
-### Capture live data and replay
-
-```bash
-# Capture 60 minutes of BTCUSDT from Bybit (US-accessible)
-./build/lob_sim --live-capture BTCUSDT --exchange bybit \
-    --output data/recorded/btc_live.csv --duration-minutes 60
-
-# Replay with market maker strategy
-./build/lob_sim --strategy mm \
-    --replay data/recorded/btc_live.csv \
-    --output data/processed/mm_run
-
-# Analyze results
-cd python && python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python analysis/plot_book_metrics.py    --run ../data/processed/mm_run --save
-python analysis/pnl_report.py           --run ../data/processed/mm_run --save
-python analysis/fill_quality.py         --run ../data/processed/mm_run --save
-python analysis/markout_analysis.py     --run ../data/processed/mm_run --save
-python analysis/performance_report.py   --run ../data/processed/mm_run --save
-```
+Run `./build/lob_sim --help` for every option: fees (negative = rebate), queue
+model, the fill-model bracket, per-channel latency and jitter, and strategy
+parameters.
 
 ---
 
-## CLI Reference
+## How the simulator works
 
 ```
-./lob_sim --synthetic-demo
-./lob_sim --load-snapshot <path.json>
-./lob_sim --replay <depth_events.csv>
-./lob_sim --strategy mm        --replay <csv> [--output <dir>] [--latency-us <N>]
-./lob_sim --strategy imbalance --replay <csv> [--output <dir>] [--latency-us <N>]
-./lob_sim --strategy twap      --replay <csv> [--output <dir>] [--latency-us <N>]
-./lob_sim --live-capture <SYMBOL> --exchange <bybit|binance> \
-          --output <csv> [--duration-minutes <N>]
+ Bybit ob200 (.zip) ─┐                      exchange time                         local (strategy) time
+ Bybit trades (.gz) ─┼─▶ EventSource ─▶ book ─▶ ExchangeSim ─┬─ feed_us ────▶ local book ─▶ Strategy
+ v2 live capture  ───┘   merge by       (true)   queue model  │                              │
+                         engine time             fills, fees  ◀── entry_us (orders, cancels) ─┘
+                                                 Portfolio   ── response_us (fills, acks) ──▶ local position
 ```
 
-`--latency-us <N>` applies a fixed N-microsecond delay across the market-data, decision, and order-entry stages, modeled as a single combined order-arrival delay: an order submitted at time T isn't matched against the book until T + N, using the book as it exists at arrival — not at decision time. Use `python/experiments/latency_sweep.sh` to sweep latencies automatically.
-
----
-
-## Results
-
-### Benchmark Performance
-
-Measured on Apple M-series, Release build (`-O3`), 1 million synthetic events (20 levels per side):
-
-| Mode                            | Throughput        |
-|---------------------------------|-------------------|
-| Book-only replay (std::map)     | **6.0M events/s** |
-| Book-only replay (sorted vector)| **8.8M events/s** |
-| Replay + MarketMaker            | **2.3M events/s** |
-
-Run `./build/lob_bench` to reproduce. See Key Finding 4 for context.
-
----
-
-### Live Data Experiment
-
-Two 60-minute sessions of BTCUSDT captured live from Bybit (USDT perpetuals, `orderbook.200`).
-
-| Session | Events  | CSV size | Price range            |
-|---------|---------|----------|------------------------|
-| 1       | ~832K   | 49 MB    | —                      |
-| 2       | ~753K   | 44 MB    | $66,790 – $66,957      |
-
-**MarketMaker on Session 2 (14,933 replay events, `--strategy mm`, tick-size-aware quoting):**
-
-| Metric               | Value                                     |
-|----------------------|--------------------------------------------|
-| Total fills          | 10 (3 buy / 7 sell) — 349 quotes cancelled |
-| Gross PnL            | **+$153.90 USD** (realized $40.32 + unrealized $113.58) |
-| Maker fees paid      | $133.74 USD (0.02% × ~$668.7K notional)    |
-| **Net PnL after fees** | **+$20.17 USD**                          |
-| Final position       | Short 4.00 BTC                             |
-| Max drawdown (net)   | –$289.00                                   |
-
-**ImbalanceStrategy on Session 2 (`--strategy imbalance`):**
-
-| Metric              | Value                              |
-|---------------------|------------------------------------|
-| Total fills         | 1 (aggressive sell at $66,857.73)  |
-| Gross PnL           | +$13.78 (unrealized; position not closed) |
-| Taker fee paid      | $26.74 USD                         |
-| Net PnL after fees  | –$12.96 USD                        |
-| Final position      | Short 1 BTC                        |
-
-The imbalance threshold (0.6) was breached only once in 14,933 events — consistent with
-Bybit `orderbook.200` being a deep L2 feed where imbalance rarely reaches extremes.
-
-**TWAP on Session 2 (`--strategy twap`, buy 100 units over 20 slices, 1s apart):**
-
-| Metric              | Value                              |
-|---------------------|------------------------------------|
-| Total fills         | 20 (20 buy / 0 sell)               |
-| Executed quantity   | 97.04 / 100.00 units (one slice partially filled — thin book) |
-| Taker fees paid     | $2,595.85 USD                      |
-| Net PnL after fees  | –$5,682.21 USD (unrealized; position never closed) |
-
-TWAP is a scheduled *execution* algorithm, not an alpha strategy — it has no view on
-whether $66,800 is a good price, so a large negative mark-to-market here just reflects
-where the price happened to drift after accumulating a long position, not a strategy bug.
-
----
-
-### Key Findings
-
-**1. An unconditional fill check was letting orders fill on events that never touched their price — fixing it changed everything downstream.**
-`ExchangeSim::advance_passive_orders` checked `qty_ahead <= 0` for every resting order on
-*every* market event, even when that event never touched the order's own price level. A
-freshly-quoted price (no prior displayed depth) starts with `qty_ahead == 0`, so under the
-old code it filled on the very next *unrelated* tick anywhere in the book. In practice this
-made MarketMaker's bid and ask fill *simultaneously* on almost every quote cycle — risk-free
-spread capture that never actually held inventory (932 fills, always in same-millisecond
-pairs, final position always flat). Gating the check on genuine activity at the order's exact
-price dropped fills from 932 to 10 fills against 349 real cancellations, produced a real
-short position, real drawdown, and real inventory risk — the honest picture an L2-only sim
-can give. See [`docs/assumptions.md`](docs/assumptions.md), "Inside-Spread Quoting."
-
-**2. Quoting must respect the venue's real tick size, not just the raw price precision.**
-This project's Bybit BTCUSDT capture only ever shows resting depth on multiples of 10 raw
-ticks ($0.10) — the venue's real minimum price increment is coarser than the $0.01 precision
-the data format supports. A strategy quoting at an arbitrary raw tick (e.g. 1 tick inside a
-10-tick-wide spread) lands on a price the market never trades at, so it can *never*
-realistically fill under an honest L2 model. `MarketMaker::Config::quote_tick_size` snaps
-quotes to the real grid; the CLI sets it to 10 for this project's captured data. A production
-system would read this from the venue's exchange-info API instead of hardcoding it.
-
-**3. Gross PnL isn't PnL — fees have to come out of the same number, not a side calculation.**
-`Portfolio::realized_pnl()`/`total_pnl()` were (and remain) trading PnL only; fees were
-deducted from `cash_` but never folded back into a "did we actually make money" figure — the
-original version of this README computed "net PnL" by hand, outside the program. `Portfolio`
-now tracks `total_fees_paid()` and exposes `net_pnl()` directly, and `pnl.csv` carries both.
-MarketMaker on Session 2 is gross-profitable (+$153.90) and *still* net-profitable after fees
-(+$20.17) — a much more interesting result than the old "gross profit, net loss by 3 orders of
-magnitude" story, and only visible once fills stopped being risk-free freebies (Finding 1).
-
-**4. Adverse selection is measurable via markout — but only once cancellations are filtered out.**
-`fills.csv` is an execution-report log, not just fills — the 349 cancelled quotes above have
-`fill_price == 0`, which is not a real price. `fill_quality.py` and `markout_analysis.py`
-originally computed slippage/markout over *all* rows, so real cancellations (rare under the
-old buggy fill model, common now) turned into fake giant-outlier "trades at $0." Both scripts
-now load fills with `only_filled=True`. Run
-`python analysis/markout_analysis.py --run data/processed/mm_bybit_fresh --save`
-to compute markout at N = 10, 50, 100 events post-fill.
-
-**5. Queue position approximation is a deliberate, still-present simplification.**
-The L2 passive fill model (`qty_ahead` decrementation) still cannot see queue replenishment —
-once a resting order's own price level is touched, it's treated as being at the front of any
-size reduction there. This remains a genuine bias (direction depends on how much cancellation
-vs. genuine trade-through activity dominates at a given level); it just no longer compounds
-with the unconditional-check bug above. See [`docs/assumptions.md`](docs/assumptions.md).
-
-**6. Flat vector outperforms std::map for shallow books; results flip at depth.**
-At 20 levels per side (typical of many venues), the sorted-vector `OrderBookFlat` achieves
-8.8M events/sec vs 6.0M for `std::map` — a ~47% throughput improvement from cache-friendly
-contiguous memory. Bybit `orderbook.200` has up to 200 levels; at that depth the O(N) vector
-shift overhead expected to negate the cache benefit. Run the benchmark with larger snapshots
-to confirm empirically.
-
----
-
-### Limitations
-
-- **L2 data only** — no per-order queue visibility; passive fills use qty-ahead approximation, and only trigger on activity at their own exact price (see Key Finding 5)
-- **No market impact** — strategy orders do not move the book (valid for small sizes)
-- **Deterministic latency** — order arrival is now genuinely delayed (see Assumptions), but with a fixed offset, not a jitter distribution
-- **Single symbol, single session** — results may not generalise across market regimes
-- **Illustrative Sharpe ratios** — a ~45-minute session is far too short for a statistically meaningful annualized Sharpe; treat `performance_report.py`'s numbers as a relative comparison tool, not a live-performance claim
-
----
-
-### Book Metrics
-
-![Book metrics over time](docs/plots/book_metrics.png)
-
-### PnL Report
-
-![PnL report](docs/plots/pnl_report.png)
-
-### Fill Quality
-
-![Fill quality analysis](docs/plots/fill_quality.png)
-
-### Performance Report
-
-![Performance report](docs/plots/performance_report.png)
-
----
-
-## Architecture
-
-See [`docs/architecture.md`](docs/architecture.md) for a full component diagram and event flow.
-
-```
-LiveCapture → Recorder → depth_events.csv
-                              │
-                              ▼
-ReplayEngine → BinanceDepthEvent → OrderBook → ExchangeSim → Strategy → Portfolio → CSV
-```
-
-The live capture flow (Bybit):
-1. Subscribe to `orderbook.200.BTCUSDT` over WebSocket
-2. Receive initial `type=snapshot` → load full book
-3. Receive `type=delta` updates → apply incrementally, write to CSV
-
-The live capture flow (Binance):
-1. Open diff-depth WebSocket stream, buffer events
-2. Fetch REST depth snapshot (`/api/v3/depth`)
-3. Run `BookSync` state machine to find the first valid event
-4. Apply subsequent events and write to CSV
-
-> **Note:** Binance is geo-blocked for US users (HTTP 451). Use `--exchange bybit` (the default).
+| Concern | What the simulator does |
+|---|---|
+| **Data** | Bybit `orderbook.200`: a snapshot, then 100 ms deltas. The book is stamped with matching-engine time (`cts`), and trade prints are merged in *before* the book update that reflects them. Tick and lot are auto-detected. RPI prints are dropped. [docs/dataset.md](docs/dataset.md) |
+| **Passive fills** | Our order joins the back of the displayed queue. It fills from prints at its price (only after the queue ahead is consumed; partial fills allowed), from prints *through* its price, or when the opposite quote crosses it. Depth decreases not explained by trades are cancellations, split between ahead of and behind us by a RiskAverse / Power(n) / Log queue model, after [hftbacktest](https://hftbacktest.readthedocs.io/en/latest/order_fill.html). [docs/assumptions.md](docs/assumptions.md) |
+| **Latency** | Three channels. **Feed:** the strategy sees a delayed book. **Entry:** orders *and cancels* land late, so stale quotes get picked off and late cancels come back `CancelRejected`. **Response:** the strategy's view of its own position lags. Optional lognormal jitter. |
+| **Orders** | Post-only, GTC, IOC and market. A local gateway refuses self-crosses and position-limit breaches. Maker and taker fees are separate; negative fees are rebates. |
+| **Attribution** | Every fill records the mid at fill and at +0.1 s, 1 s, 5 s, 30 s, 60 s and 300 s. `edge` is the spread captured at the fill instant; markout minus edge is adverse selection; gross PnL in bp of notional is the break-even maker fee. Also reported: net PnL after the cost of flattening, drawdown, inventory and quote uptime. |
+| **Speed** | Book updates: 12.1M/s (`std::map`) and 15.9M/s (sorted vector) at 20 levels; 7.9M/s and 9.6M/s at 200 levels. Full backtest loop with a strategy: 1.7–2.2M events/s (`lob_bench`, synthetic). A real BTCUSDT day (860k book updates, 320k trades) replays in about 2.5 s, streamed from the compressed files; decompression and JSON parsing are the bottleneck. |
 
 ---
 
 ## Strategies
 
-### MarketMaker
-Quotes a bid and ask symmetrically around the mid price. Cancels and re-quotes when
-the mid moves by more than 1 tick. Skews quotes toward reducing inventory when position
-exceeds the configured limit (using real inventory units, not raw scaled quantity). Does
-not quote when the book spread is unusually wide. Clamps price improvement over the real
-best bid/ask to `target_half_spread_ticks` (so a wide book spread can't push quotes deep
-inside it, onto a synthetic price nothing ever trades at), and snaps the final price to
-`quote_tick_size` — the venue's real minimum price increment, which can be coarser than
-the raw data's tick precision.
-
-Key parameters: `target_half_spread_ticks`, `quote_size`, `max_inventory`, `skew_coefficient`, `quote_tick_size`.
-
-### ImbalanceStrategy
-Computes order book imbalance (bid qty − ask qty) / (bid qty + ask qty) over the top N levels.
-Submits an aggressive market order when imbalance exceeds a configurable threshold.
-Only trades when flat (no open position). Has a cooldown period after each trade.
-
-Key parameters: `depth_levels`, `imbalance_threshold`, `order_size`, `cooldown_events`.
-
-### TwapStrategy
-A scheduled execution algorithm, not a signal-driven one: slices a total quantity into
-`num_slices` equal child market orders, fired at fixed `interval_us` intervals starting
-from the first event it sees. Deliberately indifferent to price — the standard baseline
-for working a large order into the market with minimal signaling/impact.
-
-Key parameters: `side`, `total_qty`, `num_slices`, `interval_us`.
+| Strategy | Idea | Source |
+|---|---|---|
+| `naive` | Join the best bid and ask; stop at a position limit. The control. | — |
+| `glft` | Closed-form optimal quotes with inventory skew. **σ** and fill intensity **λ(δ) = A·e^(−kδ)** are re-fitted every 5 s on a rolling 10-minute window of trades. The maker fee is added to quote depth. **Alpha:** an imbalance/microprice term shifts the fair price, with coefficients fitted on training days. Grid levels keep queue priority, and a depletion guard pulls a touch quote as soon as prints show its level being swept. | Guéant, Lehalle & Fernandez-Tapia (2013); hftbacktest GLFT and OBI tutorials; Stoikov (2018) |
+| `ladder` | For **large-tick** books (spread pinned at 1 tick, tick ≫ fee). Rest a ladder from the touch to N ticks behind it so the orders hold queue priority when price arrives. Pull only the touch order, and only when the imbalance alpha or trade-driven depletion says the level is about to break. | Moallemi & Yuan (queue value); Cont, Kukanov & Stoikov (2014) |
+| `imbalance` | Taker: cross the spread on extreme touch imbalance, exit after 5 s. Measures whether the signal can pay a taker fee. | Cont et al. (2014) |
+| `twap` | Execute a parent order in time slices, either crossing each slice immediately or posting it passively and sweeping the remainder. | — |
+| `probe` | Never-cancelled one-lot orders at scheduled points, used to score the fill model against L3 truth. | — |
 
 ---
 
-## Assumptions
+## Research workflow
 
-See [`docs/assumptions.md`](docs/assumptions.md) for a complete list. Key points:
+The process follows the [research notes](docs/research_notes.md).
 
-- **L2 only** — no per-order queue visibility; we reconstruct a price → aggregate qty map
-- **Passive fill approximation** — `qty_ahead` decremented as visible qty at a level shrinks, and only re-evaluated on activity at the order's own exact price (see assumptions doc)
-- **Inside-spread quoting is bounded** — a strategy can improve on the real best bid/ask by at most a configured amount, and must snap to the venue's real tick size, or it quotes at a price nothing ever trades at
-- **Market impact ignored** — our orders don't move the book (valid for small sizes)
-- **Order-arrival latency is real** — `--latency-us` delays when a submitted order is matched against the book (to a later, possibly-moved book state), not just a pass-through config value
-- **Pre-trade risk checks** — self-crossing prevention and an optional max-position limit, both enforced at order entry
-- **PnL is reported both gross and net of fees** — `Portfolio::realized_pnl()`/`total_pnl()` are trading PnL only; `net_pnl()` subtracts cumulative fees
+1. **Choose markets by arithmetic before backtesting.** `lob_sim --stats` across
+   24 liquid Bybit perpetuals (2026-10-01):
+
+   | Symbol | 1 tick | Spread − 2 × VIP0 maker fee |
+   |---|---|---|
+   | BTCUSDT | 0.012 bp | −3.99 bp |
+   | ETHUSDT | 0.037 bp | −3.96 bp |
+   | SOLUSDT | 0.85 bp | −3.15 bp |
+   | **ADAUSDT** | **4.1 bp** | **+0.04 bp** |
+   | **XLMUSDT** | **4.6 bp** | **+0.50 bp** |
+   | **ATOMUSDT** | **5.9 bp** | **+2.02 bp** |
+
+   On 21 of the 24 symbols, BTC and ETH included, a maker round trip at VIP0
+   (2 bp + 2 bp) costs more than the quoted spread *before* any adverse
+   selection. The study uses BTCUSDT, the most liquid control, and the three
+   large-tick contracts.
+
+2. **Fit signals out of sample.** `signal_research.py` regresses 1 s, 5 s and
+   30 s mid moves on the weighted-mid offset and depth imbalance. Coefficients
+   are fitted on days 1–4 and scored on days 5–8.
+
+   | Symbol | OOS correlation with the 5 s move (4 test days) |
+   |---|---|
+   | BTCUSDT | 0.13 – 0.18 |
+   | ATOMUSDT | 0.17 – 0.25 |
+   | ADAUSDT | 0.15 – 0.29 |
+   | XLMUSDT | 0.29 – 0.34 |
+
+   The signal is real and stable. Its *size* is the issue: a fraction of a
+   tick on large-tick books.
+
+3. **Walk-forward.** For every symbol × strategy × maker-fee tier (+2.0 bp
+   VIP0, 0 bp, −0.5 bp rebate):
+   - **Grid-search** parameters on 4 training days (2026-09-28 → 10-01).
+   - **Run** the selected parameters once on 4 untouched test days
+     (10-02 → 10-05).
+   - **Report** only test days. Training winners routinely decayed on test;
+     for example, ATOM GLFT went from +$1.16/day on training to −$16.81/day
+     on test.
+
+4. **Stress the selection.** Latency from 0 to 200 ms; queue models
+   RiskAverse and Log; the optimistic no-cross-fill bracket.
+
+5. **Validate the fill model** against order-level ground truth
+   ([Queue-model validation](#queue-model-validation)).
+
+Reproduce everything:
+
+```bash
+python python/experiments/study.py              # ~45 min on 10 cores
+python python/experiments/study.py --extended   # stage 2: grids extended where stage 1 hit a boundary
+python python/experiments/summarize_study.py    # -> results/study/SUMMARY.md, docs/plots/study_*.png
+```
 
 ---
 
-## Dataset
+## Results
 
-Live data is captured directly from Bybit's WebSocket stream using the `--live-capture` mode.
-See [`docs/dataset.md`](docs/dataset.md) for details on the normalized CSV schema and conversion tools.
+All numbers are **out of sample**: Bybit USDT perpetuals, 4 test days,
+parameters chosen on 4 earlier days. Order sizes are a few hundred dollars.
+Full tables:
+- [results/study/SUMMARY.md](results/study/SUMMARY.md)
+- [results/taker/SUMMARY.md](results/taker/SUMMARY.md)
+
+### 1. Market making: no configuration is reliably profitable at any fee tier
+
+Selected configuration per cell. Net PnL is $/day averaged over test days;
+**gross bp** is PnL before fees in bp of traded notional, which is also the
+maker fee at which that configuration would break even.
+
+| | VIP0 (+2 bp maker) | 0 bp | Rebate (−0.5 bp) | Gross bp (break-even fee) | Edge at fill → 5 s markout (bp) |
+|---|---|---|---|---|---|
+| BTCUSDT naive | −11,949 | −3,576 | −1,482 | −0.85 | −0.20 → −0.83 |
+| BTCUSDT GLFT | −26 | −97 | −68 | −0.41 … −0.74 | +0.35 → −0.70 (rebate) |
+| ATOMUSDT naive | −480 | −229 | −166 | −1.83 | −0.40 → −1.98 |
+| ATOMUSDT GLFT | −17 | −11 | −11 | −2.1 … −3.3 | +4.1 → −2.2 (rebate) |
+| ATOMUSDT ladder | −65 | −31 | −22 | −1.79 | +2.8 → −2.0 |
+| XLMUSDT naive | −1,245 | −533 | −356 | −1.50 | −0.72 → −1.65 |
+| XLMUSDT GLFT | −16 | −15 | **+1.5** (2/4 days) | −0.32 … −2.9 | +3.0 → −0.50 (rebate) |
+| XLMUSDT ladder | −38 | −9 | −1.1 (2/4 days) | −0.57 … −0.73 | +2.0 → −0.36 |
+| ADAUSDT naive | −1,638 | −769 | −552 | −1.77 | −0.54 → −1.80 |
+| ADAUSDT GLFT | −47 | −42 | −37 | −1.65 … −2.4 | +2.0 → −2.0 (rebate) |
+| ADAUSDT ladder | −249 | −149 | −125 | −3.01 | +0.55 → −1.92 |
+
+![Out-of-sample gross edge](docs/plots/study_gross_edge.png)
+
+**Stage 2: extending the grids where stage 1 hit a boundary.** GLFT always
+picked the widest half-spread multiplier and the ladder the strongest alpha,
+so both grids were extended (half-spread up to 8×, alpha up to 5×) under the
+same split.
+
+- **Training days improved.** The best wide-quote GLFT configurations earned
+  +$15 to +$21/day on the training days.
+- **Test days did not.** Daily test PnL is indistinguishable from zero:
+
+  | Config (stage 2, selected on training days) | Test-day net PnL, $/day | Mean | t-stat |
+  |---|---|---|---|
+  | BTCUSDT GLFT, rebate, half-spread 8× | −15.8, +7.7, −2.7, +28.5 | +4.4 | 0.47 |
+  | XLMUSDT GLFT, VIP0, half-spread 8× | +34.3, −4.8, −4.4, +9.4 (5–14 fills/day) | +8.7 | 0.94 |
+  | ADAUSDT GLFT, rebate, half-spread 8× | −11.9, −3.9, −25.7, +76.0 | +8.6 | 0.38 |
+  | ATOMUSDT GLFT, VIP0, half-spread 3× | −41.7, +37.8, −54.3, +25.1 | −8.3 | −0.36 |
+
+- **Why:** quoting very wide means only being filled on overshoots. That is a
+  low-frequency bet on short-term mean reversion, not market making. With so
+  few fills, any single day is a coin flip.
+- **More test days:** see [Pooled out-of-sample](#pooled-out-of-sample-16-days).
+
+#### Pooled out-of-sample (16 days)
+
+**Method.** Four test days can reject a strategy that loses every day. They
+cannot tell a small edge from zero. So every selected GLFT and ladder
+configuration was re-run, parameters frozen, on 12 more days that were never
+used for selection (2026-09-16 → 09-27), and pooled with the 4 test days
+([results/study/EXTRA_OOS.md](results/study/EXTRA_OOS.md)).
+
+**Ordinary market making is decisively negative.**
+
+| Config | $/day | t-stat | Days > 0 |
+|---|---|---|---|
+| BTCUSDT GLFT, rebate | −77.5 | −10.7 | 0 of 16 |
+| ATOMUSDT ladder, VIP0 | −86.1 | −8.0 | 0 of 16 |
+| ADAUSDT ladder, VIP0 | −181.3 | −6.9 | 0 of 16 |
+| XLMUSDT ladder, VIP0 | −62.1 | −3.1 | 4 of 16 |
+
+Every touch-based configuration has a negative mean.
+
+**Wide-quote GLFT is the one recurring positive.** These configurations quote
+2–8× the GLFT half-spread and fill only on overshoots.
+
+| Symbol | VIP0 $/day (t) | Rebate $/day (t) | Fills/day |
+|---|---|---|---|
+| ADAUSDT | +22.4 (t = 2.28, 69% of days) | +14.8 (t = 2.35) | 120–290 |
+| ATOMUSDT | +2.9 (0.42) | +8.3 (1.22) | 170–340 |
+| XLMUSDT | +7.8 (1.88) | +4.9 (0.75) | 19–1,100 |
+| BTCUSDT | −1.7 (−0.43) | +1.2 (0.23) | 80–215 |
+
+About 28 configurations were examined to get here, so one or two
+|t| > 2 cells are expected by chance. The pattern is coherent and economically
+plausible: providing liquidity only into dislocations earns a reversal
+premium (Nagel 2012). But it is a *hypothesis*, so it got a pre-registered
+test.
+
+#### Pre-registered confirmation test (30 fresh days)
+
+[results/PREREGISTRATION.md](results/PREREGISTRATION.md) was committed and
+pushed *before* the confirmation data was downloaded. It fixes:
+- the eight configurations, with every parameter frozen;
+- a 30-day window, 2026-08-17 → 09-15, never touched before;
+- the pass/fail rules. The primary criterion is a daily ADA+ATOM+XLM
+  portfolio at VIP0 with t > 2 and more than half of days positive. Any
+  per-configuration claim needs t > 2.7 (Bonferroni).
+
+**Result: H1 not supported**
+([results/confirmation/CONFIRMATION.md](results/confirmation/CONFIRMATION.md)).
+
+| Pre-registered criterion | Mean $/day | t-stat | Days > 0 | Verdict |
+|---|---|---|---|---|
+| Primary: ADA+ATOM+XLM, VIP0 | +2.80 | +0.31 | 53% | not supported |
+| Secondary: ADA+ATOM+XLM, rebate | −5.67 | −0.74 | 57% | not supported |
+
+- **No single configuration came close to t > 2.7.** The best was ATOM at the
+  rebate tier, t = +0.79.
+- **ADAUSDT, the strongest candidate (t = 2.3 over 16 days), went to −$1.49/day
+  (t = −0.17) on fresh data.**
+- **What the wide-quote "edge" was:** selection noise across about 28
+  configurations, exactly what the multiple-comparisons warning predicted.
+  The pre-registration is what kept it from being reported as a result.
+
+What the table shows:
+
+- **Every gross bp is negative.** Every passive configuration on every symbol
+  loses money *before fees* out of sample. The fee tier only decides how much
+  more it loses. The one positive net cell, XLM GLFT with a rebate at
+  +$1.5/day, is positive on 2 of 4 days and is noise.
+- **The research ideas do help.** Imbalance alpha, fee-aware depth, the
+  queue-priority ladder and the trade-driven depletion guard shrink ATOM losses
+  from −$480/day (naive) to −$65/day (ladder) at VIP0, and from −$166 to −$22
+  at the rebate tier. They move *edge at fill* from negative to +0.5–7 bp. And
+  they were selected on training data, not by hand.
+- **None of it beats adverse selection.** Within 5 seconds the mid moves
+  through the fill by more than the spread captured. A resting order mostly
+  fills when the market is about to move through it, and that is the
+  mechanism Glosten–Milgrom and Moallemi–Yuan describe.
+- **BTCUSDT cannot work for a retail participant.**
+  - The spread is 0.012 bp, so a quote earns essentially nothing by sitting at the touch.
+  - GLFT's fee-aware quotes sit about 170 ticks out at VIP0 and only fill on large moves.
+  - At the rebate tier it quotes at the touch and loses −0.74 bp gross.
+
+  This matches the hftbacktest author's own caveat that their positive
+  results come "mainly from rebates", and that edge decayed from 0.0139%
+  per trade (2023) to 0.0044% (2025).
+
+**One out-of-sample day, dissected** (ATOMUSDT ladder, rebate tier, 2026-10-02):
+
+![Example run report](docs/plots/example_run_report.png)
+
+- **Fills at our price after the queue ahead is consumed** (49% of volume):
+  +5.8 bp at the fill, about 0 bp within 1 s.
+- **Fills where the level vanished and price crossed through the order**
+  (40%): about −3 bp throughout.
+- **Prints through the price** (11%): −5 to −7 bp.
+- **Net:** the rebate (+$8.6) doesn't cover the −$25 gross.
+
+### 2. The result is robust to latency and fill-model assumptions, except the queue model on large-tick books
+
+Re-running the selected configurations on test days:
+
+| | 0 ms → 200 ms latency (gross bp) | Optimistic (no cross-fills) | Queue: RiskAverse | Queue: Log |
+|---|---|---|---|---|
+| BTCUSDT GLFT, VIP0 | −0.41 → −0.96 | −0.47 | −0.41 | −0.41 |
+| BTCUSDT GLFT, rebate | −0.74 → −0.79 | −0.80 | −0.76 | −0.70 |
+| ATOMUSDT ladder, rebate | −1.79 → −2.07 | −1.85 | −2.01 | −0.46 |
+| XLMUSDT ladder, rebate | −0.57 → −0.60 | −0.48 | −0.82 | **+2.00** (+$69/day) |
+| ADAUSDT ladder, rebate | −3.01 → −1.92 | −3.15 | −3.42 | −2.27 |
+
+- **BTC is negative under every assumption.**
+- **On large-tick books the queue model decides the answer.**
+  - The Log model credits a near-front order with a larger share of the
+    cancellations ahead of it.
+  - So the order reaches the front more often, and front-of-queue fills are
+    the profitable ones.
+  - Under Log, the XLM ladder makes +2.0 bp gross (+$69/day at the rebate
+    tier), and +1.85 bp gross even at VIP0.
+- **A result whose sign flips with an unobservable modelling choice is not an
+  edge.** It is a hypothesis about queue dynamics, and the next section tests
+  it directly. The answer: the Log model over-fills by 31% against
+  order-level ground truth, so the positive Log-model results don't hold.
+
+### Queue-model validation
+
+L2 data cannot show where in a queue cancellations come from, but L3 data can.
+
+**Capture.** `capture_bitstamp_l3.py` records Bitstamp's public order-level
+feed for BTC/USD, ETH/USD and XRP/USD. Bitstamp is the only free
+unauthenticated L3 feed we found: Coinbase `full` and LOBSTER samples now
+require accounts.
+
+**Ground truth.** `l3_ground_truth.py` places probe orders at the touch every
+5 s and computes from exact order priority when each would truly have filled.
+
+**Scoring.** `queue_model_validation.py` runs the *actual C++ fill model*,
+under each queue model, on the 100 ms-conflated L2+trades view of the same
+market and scores each model's fills against the truth.
+
+**Data.** 70 minutes of BTC/USD, ETH/USD and XRP/USD: 1,666 probes per pair,
+scored at 5, 15 and 60 s horizons
+([results/queue_validation/VALIDATION.md](results/queue_validation/VALIDATION.md)).
+
+**BTC/USD is where the queue model matters**: 58% of true 60 s fills are
+queue-driven, meaning prints at the probe's own price after the queue ahead
+was consumed.
+
+| Model (BTC/USD, 60 s) | Simulated fill rate (true: 0.296) | Accuracy | Precision |
+|---|---|---|---|
+| Power-2 (default) | 0.284 | 0.959 | 0.949 |
+| Power-3 | 0.291 | 0.960 | 0.939 |
+| RiskAverse | 0.269 | 0.973 | 1.000 |
+| **Log** | **0.387 (+31%)** | **0.879** | **0.726** |
+| Power-2 without cross-fills | 0.281 | 0.956 | 0.948 |
+
+**On ETH/USD and XRP/USD** almost every true fill comes from price moving
+through the probe. Every model scores 0.997–1.000 accuracy, *except* the
+no-cross-fill variant, which misses 44–84% of real fills.
+
+Two conclusions:
+
+1. **The Log queue model over-fills by about 31% against ground truth.** It
+   was the only assumption under which the XLM and ATOM ladders turned
+   positive in the sensitivity study, so that result is not credible. The
+   default Power-2 model is well calibrated.
+2. **Book-cross fills are real fills.** The "optimistic bracket" that drops
+   them is simply wrong, which makes the default model's adverse cross-fills
+   the realistic case, not a pessimistic one.
+
+The caveat is that this is Bitstamp, not Bybit. Queue dynamics differ by
+venue, and no public Bybit L3 feed exists.
+
+### 3. Taker strategies and execution
+
+**Imbalance taker.**
+- On BTCUSDT the imbalance signal is genuine: crossing in its direction earns
+  +0.24 to +0.28 bp gross per trade over the 4 test days.
+- The taker fee is 5.5 bp, so the net is −5.2 bp.
+- On ATOM, crossing a 5.9 bp tick costs more than the signal predicts.
+- This is why the signal belongs inside a passive quoter, not a taker.
+
+**TWAP.** Buy 1 BTC in 20 one-minute slices; costs are against the arrival mid.
+
+| Mode | Price shortfall | Fees | Total cost | Filled passively |
+|---|---|---|---|---|
+| Aggressive (cross every slice) | −2.49 bp | 5.50 bp | **+3.01 bp** | 0% |
+| Passive (post, sweep remainder) | −1.72 bp | 2.96 bp | **+1.24 bp** | 73% |
+
+Passive slicing gives back about 0.8 bp of price, because waiting is
+adversely selected. It saves about 2.5 bp in fees. It was the cheaper choice
+on **all four** test days, by 1.8 bp per execution on average. That is the
+one robustly positive, actionable result here: **use limit orders to
+*execute*, not to make markets**.
+
+### 4. What it would take
+
+Reading the break-even column together with the sensitivity runs, a passive
+market maker on these contracts needs **at least one** of the following, by a
+margin of about 1–3 bp:
+
+- **Faster cancellation than the 100 ms public book allows.**
+  - Bybit offers 10–20 ms books for top levels.
+  - Professional makers react in microseconds.
+  - The depletion guard, which reacts to individual prints, was picked by 19 of 21
+    walk-forward selection, so faster reaction clearly pays.
+- **A maker rebate deeper than −0.5 bp**, which means Bybit's market-maker
+  programme with its volume obligations.
+- **Validated front-of-queue priority**, as in the Log-model scenario, which
+  in practice means being early to every new level.
 
 ---
 
-## Extensions
+## What changed and why
 
-- [ ] L3 order-level simulation (requires ITCH or proprietary OMS feed)
-- [ ] Multi-threaded engine with lock-free book updates
-- [ ] Additional strategies — momentum, spread arbitrage (TWAP is done; see Strategies)
-- [ ] Latency jitter — a log-normal distribution and co-location tiers, on top of the deterministic delay that's already modeled (see Assumptions)
-- [ ] Parquet output for large-scale analysis
-- [ ] Auto-detect venue tick size from exchange-info (`MarketMaker::Config::quote_tick_size` is hardcoded per-venue today)
-- [ ] Trade-print (aggTrade) ingestion, so passive fills can be evidenced by real trades crossing a level instead of only by displayed-quantity changes
+The original simulator's headline numbers were artifacts. In order of impact:
+
+| Problem | Effect | Fix |
+|---|---|---|
+| Passive fill rule only fired when the level qty went *up* at a fresh price, and cancelled the order when its level emptied | Orders joining a real queue could never fill; "fills" were noise | Trade-driven fills, a queue model and partial fills ([assumptions](docs/assumptions.md)) |
+| No trade data at all | No execution evidence; fills inferred from depth only | Bybit trade prints merged in engine time |
+| Live capture never recorded the initial snapshot | Every replay started from an empty book; the first state of the main session had a 277-tick spread | v2 capture with snapshots, trades and exact decimals |
+| Binance `bookDepth` converted into "price levels" | It is ±1–5% cumulative depth sampled every 30–60 s, not an order book; `mm_btc_20240405` was meaningless | Converter deleted; Bybit's real L2 archive used instead |
+| Quantities stored ×100 | 0.001 BTC levels rounded to zero | Integer lots from the detected lot size |
+| Cancels were instantaneous; one combined latency | No stale-quote risk, the main cost of latency | Separate feed, entry and response channels; cancel-after-fill rejects |
+| `ImbalanceStrategy` opened one position and never exited | One trade per session | Hold time and signal-flip exit |
+| Reported PnL with one fill-model assumption, one session, in-sample | Unfalsifiable | Walk-forward over 8 days, three fee tiers, latency and queue sweeps, L3 validation |
+
+---
+
+## Limitations
+
+- **Fifty days, one market regime.** That is 8 selection/test days, 12
+  pooled out-of-sample days and 30 confirmation days, all from August to
+  October 2026. It is enough to reject the strategies here, but it is not a
+  claim about every market regime.
+- **No market impact.** Our orders never move the replayed book. That is
+  valid at a few hundred dollars per order.
+- **The 100 ms book is a hard floor** on how fast a simulated strategy can see
+  cancellations. Results are pessimistic for a truly low-latency participant,
+  and the no-cross-fill bracket bounds that.
+- **The −0.5 bp rebate is a scenario**, not a published Bybit rate.
+  Programme terms are private.
+- **Funding is not modelled.** Holding periods are seconds to minutes.
+- **The queue model is validated on Bitstamp, not Bybit.** No public Bybit L3
+  feed exists, and queue dynamics differ by venue.
+
+---
+
+## Repository layout
+
+```
+cpp/include, cpp/src   core/ marketdata/ sim/ strategy/      app/main.cpp CLI   bench/ tests/
+python/data            download_bybit.py, capture_bitstamp_l3.py
+python/analysis        signal_research.py, l3_ground_truth.py, queue_model_validation.py, run_report.py
+python/experiments     run_backtests.py, study.py, summarize_study.py
+results/               study tables, fitted signals, taker/execution summary, queue validation
+docs/                  research_notes.md, assumptions.md, dataset.md, architecture.md
+```
+
+## Sources
+
+The research notes ([docs/research_notes.md](docs/research_notes.md)) have the
+full list with what was verified. Key references:
+
+- Avellaneda & Stoikov (2008), *High-frequency trading in a limit order book*
+- Guéant, Lehalle & Fernandez-Tapia (2013), *Dealing with the inventory risk* ([arXiv:1105.3115](https://arxiv.org/abs/1105.3115))
+- Stoikov (2018), *The micro-price*; Cont, Kukanov & Stoikov (2014), *The price impact of order book events*
+- Moallemi & Yuan, *A model for queue position valuation in a limit order book*
+- [hftbacktest](https://github.com/nkaz001/hftbacktest): queue models, GLFT and OBI market-making tutorials
+- [Bybit history data](https://www.bybit.com/derivatives/en/history-data), [public trades](https://public.bybit.com/trading/)
+- [Bitstamp WebSocket API v2](https://www.bitstamp.net/websocket/v2/) (live_orders L3)

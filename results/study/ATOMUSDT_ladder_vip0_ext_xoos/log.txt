@@ -1,0 +1,21 @@
+[test] 1 parameter sets x 12 days
+       day split  params  maker_fills  taker_fills  notional  gross_pnl  fees  net_pnl  net_pnl_flat  net_bps_of_notional  edge  markout_5s  max_drawdown  max_abs_position
+2026-09-16  test default         1068            0  86018.08      13.81 17.20    -3.39         -4.34                -0.39 20.88       -7.34         24.41            1111.9
+2026-09-17  test default         1178            0  97821.94       6.55 19.56   -13.01        -13.59                -1.33 30.93      -20.08         25.41            1052.4
+2026-09-18  test default         2466            0 228781.34     -23.88 45.76   -69.63        -69.81                -3.04 76.20      -48.58         76.49            1053.2
+2026-09-19  test default         2944            0 256495.90     -66.34 51.30  -117.64       -118.89                -4.59 84.47      -46.96        123.10            1092.0
+2026-09-20  test default         2602            0 217768.19     -69.21 43.55  -112.76       -113.25                -5.18 74.46      -29.34        124.61            1196.2
+2026-09-21  test default         3088            0 297190.70     -52.06 59.44  -111.50       -112.44                -3.75 81.85      -41.84        124.89            1177.3
+2026-09-22  test default         3705            0 360531.81     -85.10 72.11  -157.21       -157.92                -4.36 89.40      -55.61        163.89            1178.1
+2026-09-23  test default         3617            0 326523.43     -15.35 65.30   -80.65        -81.97                -2.47 82.20      -34.07         91.26            1194.6
+2026-09-24  test default         2931            0 271436.79     -25.68 54.29   -79.97        -80.72                -2.95 69.63      -38.92         86.99            1146.3
+2026-09-25  test default         2465            0 218120.95     -15.81 43.62   -59.44        -60.22                -2.72 59.88      -27.40         65.36            1082.6
+2026-09-26  test default         3339            0 307934.93     -17.87 61.59   -79.46        -80.33                -2.58 70.30      -66.58         93.21            1096.7
+2026-09-27  test default         2727            0 256316.94     -87.81 51.26  -139.07       -139.09                -5.43 60.98      -59.93        142.48            1191.1
+
+Test-day net PnL by parameter set: mean / std / % days positive / total
+          mean   std  pct_pos    total
+params                                
+default -85.31  46.2      0.0 -1023.73
+
+wrote /Users/saarthakgupta/code/Finance Project/lob-sim-cpp/results/study/ATOMUSDT_ladder_vip0_ext_xoos/results.csv

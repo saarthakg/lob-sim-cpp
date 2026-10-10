@@ -65,6 +65,8 @@ target_link_libraries(lob_sim PRIVATE lob_core ixwebsocket)
 file(GLOB TEST_SRCS "cpp/tests/*.cpp")
 add_executable(lob_tests ${TEST_SRCS})
 target_link_libraries(lob_tests PRIVATE lob_core Catch2::Catch2WithMain)
+# Catch2's TEST_CASE uses __COUNTER__, which newer Clang flags under -Wpedantic.
+target_compile_options(lob_tests PRIVATE -Wno-c2y-extensions)
 
 include(CTest)
 include(Catch)

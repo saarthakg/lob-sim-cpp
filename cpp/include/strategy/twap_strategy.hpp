@@ -1,41 +1,47 @@
 #pragma once
 #include "strategy.hpp"
+#include <unordered_map>
 
-// TWAP (Time-Weighted Average Price) execution strategy.
+// TWAP execution: slice `total_qty` into `num_slices` child orders fired every
+// `interval_us`. An execution algorithm, not an alpha strategy — judge it by
+// implementation shortfall (average fill vs. arrival mid), not PnL.
 //
-// Unlike MarketMaker (passive, continuous quoting) or ImbalanceStrategy
-// (signal-triggered, opportunistic), TWAP is a scheduled execution algorithm:
-// it slices a single large parent order into `num_slices` equal child market
-// orders, fired at fixed `interval_us` intervals starting from the first
-// event it sees. This is the standard baseline execution algo used to work
-// a large order into the market with minimal signaling/impact, and it's
-// deliberately indifferent to price — it trades on the clock, not on signal.
+// passive = true posts each slice at the near touch and only crosses the
+// spread for whatever is still unfilled when the next slice is due, which
+// typically saves most of the half-spread + (taker − maker) fee.
 class TwapStrategy : public Strategy {
 public:
     struct Config {
-        Side    side        = Side::Bid;       // direction to execute
-        Qty     total_qty   = 10000;           // total quantity (scaled units) to execute
-        int     num_slices  = 20;              // number of child market orders
-        int64_t interval_us = 1'000'000;       // time between slices (default: 1s)
+        Side    side        = Side::Bid;
+        Qty     total_qty   = 100;
+        int     num_slices  = 20;
+        int64_t interval_us = 60'000'000;
+        bool    passive     = false;
     };
 
-    TwapStrategy();
-    explicit TwapStrategy(Config config);
-
-    void on_market_event(Timestamp ts, const OrderBook& book,
-                         ExchangeSim& exchange, Portfolio& portfolio) override;
+    TwapStrategy() = default;
+    explicit TwapStrategy(Config cfg) : cfg_(cfg) {}
 
     std::string name() const override { return "TwapStrategy"; }
+    int64_t timer_interval_us() const override { return 100'000; }
+    void on_timer(StrategyContext& ctx) override;
+    void on_order_update(StrategyContext& ctx, const ExecutionReport& rep) override;
 
-    // True once all slices have been sent (no more child orders to place).
-    bool finished() const { return slices_sent_ >= config_.num_slices; }
-    int  slices_sent() const { return slices_sent_; }
+    bool   finished()    const { return slices_sent_ >= cfg_.num_slices && filled_ >= cfg_.total_qty; }
+    int    slices_sent() const { return slices_sent_; }
+    Qty    filled()      const { return filled_; }
+    double arrival_mid() const { return arrival_mid_; }   // ticks
+    double avg_fill_px() const { return filled_ > 0 ? fill_cost_ / static_cast<double>(filled_) : 0.0; }
 
 private:
-    Config    config_;
+    Config    cfg_;
     int       slices_sent_ = 0;
     Timestamp first_ts_    = 0;
-    bool      started_     = false;
+    Qty       sent_qty_    = 0;
+    Qty       filled_      = 0;
+    double    fill_cost_   = 0.0;   // Σ price_ticks · qty
+    double    arrival_mid_ = 0.0;
+    std::unordered_map<OrderId, Qty> passive_qty_;
 
     Qty slice_qty(int index) const;
 };

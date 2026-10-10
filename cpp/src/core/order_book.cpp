@@ -76,6 +76,37 @@ double OrderBook::imbalance(int depth_levels) const {
     return static_cast<double>(bid_qty - ask_qty) / total;
 }
 
+double OrderBook::weighted_mid() const {
+    auto bid = best_bid();
+    auto ask = best_ask();
+    if (!bid || !ask) return 0.0;
+    double qb = static_cast<double>(bid->qty), qa = static_cast<double>(ask->qty);
+    if (qb + qa <= 0.0) return mid_price();
+    // (Pb*Qa + Pa*Qb) / (Qb + Qa)
+    return (static_cast<double>(bid->price) * qa + static_cast<double>(ask->price) * qb) / (qb + qa);
+}
+
+double OrderBook::depth_imbalance(Price ticks) const {
+    if (empty()) return 0.0;
+    double mid = mid_price();
+    double bq = 0.0, aq = 0.0;
+    for (const auto& [px, q] : bids_) {
+        if (mid - static_cast<double>(px) > static_cast<double>(ticks)) break;
+        bq += static_cast<double>(q);
+    }
+    for (const auto& [px, q] : asks_) {
+        if (static_cast<double>(px) - mid > static_cast<double>(ticks)) break;
+        aq += static_cast<double>(q);
+    }
+    if (bq + aq <= 0.0) return 0.0;
+    return (bq - aq) / (bq + aq);
+}
+
+bool OrderBook::crossed() const {
+    if (empty()) return false;
+    return bids_.begin()->first >= asks_.begin()->first;
+}
+
 Qty OrderBook::visible_qty_at_price(Side side, Price px) const {
     if (side == Side::Bid) {
         auto it = bids_.find(px);

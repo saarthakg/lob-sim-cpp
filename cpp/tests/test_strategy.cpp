@@ -1,223 +1,129 @@
-#include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
-#include "../include/strategy/market_maker.hpp"
+#include <catch2/catch_test_macros.hpp>
+#include "../include/sim/backtester.hpp"
+#include "../include/strategy/estimators.hpp"
+#include "../include/strategy/glft_market_maker.hpp"
 #include "../include/strategy/imbalance_strategy.hpp"
 #include "../include/strategy/twap_strategy.hpp"
-#include "../include/sim/exchange_sim.hpp"
-#include "../include/sim/portfolio.hpp"
-#include "../include/core/order_book.hpp"
 
-static BinanceDepthEvent make_tick(Timestamp ts, UpdateId uid) {
-    BinanceDepthEvent ev{};
-    ev.event_time      = ts;
-    ev.first_update_id = uid;
-    ev.final_update_id = uid;
-    return ev;
+#include <cmath>
+#include <random>
+
+using Catch::Approx;
+
+static Instrument inst() {
+    Instrument i;
+    i.symbol = "TEST";
+    i.tick_size = 0.1;
+    i.lot_size = 0.001;
+    return i;
 }
 
-TEST_CASE("MarketMaker: inventory skew uses real position units, not raw scaled qty",
-          "[strategy]") {
-    // Regression test for a unit-scaling bug: pos (Qty) is scaled by
-    // TICK_MULTIPLIER just like price, so skew_coefficient * pos was ~100x
-    // too large a tick offset. Fixed version divides pos by TICK_MULTIPLIER
-    // first. Uses a spread matched to 2*target_half_spread_ticks so the
-    // (separate) touch-relative clamp is a no-op and skew is directly
-    // observable in the quoted price.
-    OrderBook book;
-    BookSnapshot snap{};
-    snap.last_update_id = 1;
-    snap.bids = {{6500000, 1000}};
-    snap.asks = {{6500010, 1000}};  // mid = 6500005, spread = 10 ticks
-    book.load_snapshot(snap);
+TEST_CASE("GLFT closed form matches hand calculation", "[strategy]") {
+    double hs, sk;
+    const double g = 0.05, A = 2.0, k = 0.5, s = 3.0;
+    GlftMarketMaker::glft_coefficients(g, A, k, s, hs, sk);
+    double c1 = 1.0 / g * std::log(1 + g / k);
+    double c2 = std::sqrt(g / (2 * A * k) * std::pow(1 + g / k, k / g + 1));
+    REQUIRE(hs == Approx(c1 + 0.5 * s * c2));
+    REQUIRE(sk == Approx(s * c2));
+    // More risk-averse → larger skew; more volatile → wider spread.
+    double hs2, sk2;
+    GlftMarketMaker::glft_coefficients(0.5, A, k, s, hs2, sk2);
+    REQUIRE(sk2 > sk);
+    GlftMarketMaker::glft_coefficients(g, A, k, 2 * s, hs2, sk2);
+    REQUIRE(hs2 > hs);
+}
 
-    MarketMaker::Config cfg;
-    cfg.target_half_spread_ticks = 5;
-    cfg.quote_size       = 100;
-    cfg.max_inventory     = 1000;
-    cfg.skew_coefficient  = 0.5;   // ticks of skew per real unit of inventory
-    cfg.max_spread_ticks  = 1000;
-    MarketMaker mm(cfg);
-
-    ExchangeSim exchange;
-    Portfolio portfolio;
-    // Establish a long position of 3.00 real units (300 in scaled Qty) directly,
-    // bypassing the exchange (Portfolio tracks fills independently of ExchangeSim).
-    portfolio.on_fill(Side::Bid, 6500000, 300, 0.0);
-
-    mm.on_market_event(1000, book, exchange, portfolio);
-
-    // mid=6500005, half_spread=5, skew=round(0.5*3.0)=2:
-    //   bid_px = 6500005 - 5 - 2 = 6499998  (>= best_bid+5=6500005 clamp? no, clamp is min(), unaffected)
-    //   ask_px = 6500005 + 5 - 2 = 6500008  (<= best_ask-5=6500005 clamp? no, clamp is max(), unaffected)
-    // Both land on fresh price levels (qty_ahead starts at 0), so a tick
-    // touching those exact prices fills them, exposing the submitted price.
-    BinanceDepthEvent tick = make_tick(2000, 101);
-    tick.bid_updates = {{6499998, 500}};
-    tick.ask_updates = {{6500008, 500}};
-    auto reports = exchange.on_market_event(tick, book, portfolio);
-    REQUIRE(reports.size() == 2);
-
-    bool saw_bid = false, saw_ask = false;
-    for (const auto& r : reports) {
-        if (r.side == Side::Bid) { REQUIRE(r.fill_price == 6499998); saw_bid = true; }
-        if (r.side == Side::Ask) { REQUIRE(r.fill_price == 6500008); saw_ask = true; }
+TEST_CASE("IntensityEstimator recovers A and k from synthetic exponential arrivals", "[strategy]") {
+    // Per step, per side, P(max depth >= d) = 1 - exp(-A e^{-k d} dt).
+    const double A = 3.0, k = 0.4, dt = 0.1;
+    IntensityEstimator est(dt, 200000, 30);
+    std::mt19937_64 rng(7);
+    std::uniform_real_distribution<double> U(0, 1);
+    for (int i = 0; i < 100000; ++i) {
+        est.begin_step(0.0);
+        for (int side = 0; side < 2; ++side) {
+            // inverse-CDF sample of max depth
+            double u = U(rng);
+            double p0 = 1 - std::exp(-A * dt);
+            if (u > p0) continue;  // no trade this step
+            double d = -std::log(-std::log(1 - u) / (A * dt)) / k;
+            est.on_trade(side == 0, side == 0 ? d : -d);
+        }
     }
-    REQUIRE(saw_bid);
-    REQUIRE(saw_ask);
+    est.begin_step(0.0);
+    double Ahat, khat;
+    REQUIRE(est.fit(Ahat, khat));
+    // The fit targets λ ≈ P/dt, which is biased low where P is not small;
+    // check it's in the right neighbourhood.
+    REQUIRE(khat == Approx(k).epsilon(0.2));
+    REQUIRE(Ahat == Approx(A).epsilon(0.5));
 }
 
-TEST_CASE("MarketMaker: quotes are clamped to a realistic distance from the real touch "
-          "when the book spread is wide", "[strategy]") {
-    // Regression test: with a fixed mid-relative offset, a wide book spread
-    // would otherwise place quotes deep inside the spread at a synthetic
-    // price with no resting depth and no realistic chance of ever being
-    // touched by genuine trading activity (see docs/assumptions.md,
-    // "Inside-Spread Quoting"). The fix clamps price improvement over the
-    // real best bid/ask to target_half_spread_ticks.
-    OrderBook book;
-    BookSnapshot snap{};
-    snap.last_update_id = 1;
-    snap.bids = {{6500000, 1000}};
-    snap.asks = {{6500200, 1000}};  // mid = 6500100, spread = 200 ticks
-    book.load_snapshot(snap);
-
-    MarketMaker::Config cfg;
-    cfg.target_half_spread_ticks = 1;
-    cfg.max_spread_ticks         = 1000;
-    MarketMaker mm(cfg);
-
-    ExchangeSim exchange;
-    Portfolio portfolio;  // flat: no skew to worry about
-
-    mm.on_market_event(1000, book, exchange, portfolio);
-
-    // Raw mid-relative prices would be 6500099/6500101 (deep inside the
-    // spread). Clamped: bid <= best_bid+1=6500001, ask >= best_ask-1=6500199.
-    BinanceDepthEvent tick = make_tick(2000, 101);
-    tick.bid_updates = {{6500001, 500}};
-    tick.ask_updates = {{6500199, 500}};
-    auto reports = exchange.on_market_event(tick, book, portfolio);
-    REQUIRE(reports.size() == 2);
-
-    bool saw_bid = false, saw_ask = false;
-    for (const auto& r : reports) {
-        if (r.side == Side::Bid) { REQUIRE(r.fill_price == 6500001); saw_bid = true; }
-        if (r.side == Side::Ask) { REQUIRE(r.fill_price == 6500199); saw_ask = true; }
-    }
-    REQUIRE(saw_bid);
-    REQUIRE(saw_ask);
+TEST_CASE("VolatilityEstimator scales to per-sqrt-second", "[strategy]") {
+    VolatilityEstimator v(0.1, 100000);
+    std::mt19937_64 rng(1);
+    std::normal_distribution<double> N(0, 2.0);  // 2 ticks per 100 ms step
+    double m = 0;
+    for (int i = 0; i < 50000; ++i) { m += N(rng); v.add_mid(m); }
+    REQUIRE(v.sigma() == Approx(2.0 * std::sqrt(10.0)).epsilon(0.03));
 }
 
-TEST_CASE("MarketMaker: suppresses the bid once long inventory hits the max", "[strategy]") {
-    OrderBook book;
-    BookSnapshot snap{};
-    snap.last_update_id = 1;
-    snap.bids = {{6500000, 1000}};
-    snap.asks = {{6500200, 1000}};
-    book.load_snapshot(snap);
+namespace {
+MarketEvent snap(Timestamp ts, Price bid, Price ask, Qty bq = 100, Qty aq = 100) {
+    MarketEvent e;
+    e.ts = ts; e.type = EventType::Snapshot;
+    e.bids = {{bid, bq}}; e.asks = {{ask, aq}};
+    return e;
+}
+}  // namespace
 
-    MarketMaker::Config cfg;
-    cfg.max_inventory    = 500;
-    cfg.max_spread_ticks = 1000;  // book spread is 200 ticks; don't skip quoting
-    MarketMaker mm(cfg);
-
-    ExchangeSim exchange;
-    Portfolio portfolio;
-    portfolio.on_fill(Side::Bid, 6500000, 500, 0.0);  // at the max long inventory
-
-    mm.on_market_event(1000, book, exchange, portfolio);
-
-    // Raw ask_px = mid+1-skew = 6500100+1-3 = 6500098, but the 200-tick spread
-    // clamps it to best_ask-1 = 6500199. Bid is suppressed entirely (inventory
-    // at max), so only the ask needs a touch.
-    BinanceDepthEvent tick = make_tick(2000, 101);
-    tick.ask_updates = {{6500199, 500}};
-    auto reports = exchange.on_market_event(tick, book, portfolio);
-
-    // Only the ask (inventory-reducing side) should have been placed and filled.
-    REQUIRE(reports.size() == 1);
-    REQUIRE(reports[0].side == Side::Ask);
+TEST_CASE("ImbalanceStrategy enters on imbalance and exits after the hold time", "[strategy]") {
+    std::vector<MarketEvent> evs;
+    for (int i = 0; i < 100; ++i) evs.push_back(snap(i * 100'000, 1000, 1001, i < 10 ? 1000 : 100, 10));
+    VectorSource src(inst(), evs);
+    ImbalanceStrategy::Config c;
+    c.threshold = 0.8;
+    c.order_qty = 5;
+    c.hold_us = 2'000'000;
+    c.cooldown_us = 100'000'000;
+    ImbalanceStrategy s(c);
+    BacktestConfig cfg;
+    cfg.quiet = true;
+    Backtester bt(src, s, cfg);
+    auto r = bt.run();
+    REQUIRE(r.taker_fills == 2);          // one entry, one exit
+    REQUIRE(bt.portfolio().position() == 0);
 }
 
-TEST_CASE("ImbalanceStrategy: strong bid pressure triggers an aggressive buy", "[strategy]") {
-    OrderBook book;
-    BookSnapshot snap{};
-    snap.last_update_id = 1;
-    snap.bids = {{6500000, 3000}};
-    snap.asks = {{6500100, 500}};  // imbalance(5) = (3000-500)/3500 ~= 0.714 > 0.6
-    book.load_snapshot(snap);
-
-    ImbalanceStrategy strat;
-    ExchangeSim exchange;
-    Portfolio portfolio;
-
-    strat.on_market_event(1000, book, exchange, portfolio);
-    REQUIRE(portfolio.position() == 100);  // default order_size, fully filled
+TEST_CASE("TWAP executes the full quantity in the scheduled number of slices", "[strategy]") {
+    std::vector<MarketEvent> evs;
+    for (int i = 0; i < 300; ++i) evs.push_back(snap(i * 100'000, 1000, 1001, 1000, 1000));
+    VectorSource src(inst(), evs);
+    TwapStrategy::Config c;
+    c.total_qty = 100;
+    c.num_slices = 10;
+    c.interval_us = 1'000'000;
+    TwapStrategy t(c);
+    BacktestConfig cfg;
+    cfg.quiet = true;
+    Backtester bt(src, t, cfg);
+    auto r = bt.run();
+    REQUIRE(t.slices_sent() == 10);
+    REQUIRE(bt.portfolio().position() == 100);
+    REQUIRE(r.taker_fills == 10);
 }
 
-TEST_CASE("ImbalanceStrategy: cooldown suppresses re-triggering immediately after a trade",
-          "[strategy]") {
-    OrderBook book;
-    BookSnapshot snap{};
-    snap.last_update_id = 1;
-    snap.bids = {{6500000, 3000}};
-    snap.asks = {{6500100, 500}};
-    book.load_snapshot(snap);
-
-    ImbalanceStrategy::Config cfg;
-    cfg.cooldown_events = 3;
-    ImbalanceStrategy strat(cfg);
-    ExchangeSim exchange;
-    Portfolio portfolio;
-
-    strat.on_market_event(1000, book, exchange, portfolio);
-    REQUIRE(portfolio.position() == 100);
-
-    // Flatten so the "only trade when flat" guard doesn't also suppress it —
-    // isolate the cooldown behaviour specifically.
-    portfolio.on_fill(Side::Ask, 6500000, 100, 0.0);
-    REQUIRE(portfolio.position() == 0);
-
-    strat.on_market_event(1001, book, exchange, portfolio);
-    REQUIRE(portfolio.position() == 0);  // still cooling down, no new trade
-}
-
-TEST_CASE("TwapStrategy: slices fire on schedule and sum to exactly total_qty", "[strategy]") {
-    OrderBook book;
-    BookSnapshot snap{};
-    snap.last_update_id = 1;
-    snap.bids = {{6500000, 100000}};
-    snap.asks = {{6500100, 100000}};  // deep enough that every slice fills fully
-    book.load_snapshot(snap);
-
-    TwapStrategy::Config cfg;
-    cfg.side        = Side::Bid;
-    cfg.total_qty   = 1003;   // deliberately not evenly divisible by num_slices
-    cfg.num_slices  = 5;
-    cfg.interval_us = 1000;
-    TwapStrategy twap(cfg);
-
-    ExchangeSim exchange;
-    Portfolio portfolio;
-
-    twap.on_market_event(0, book, exchange, portfolio);
-    REQUIRE(twap.slices_sent() == 1);
-    REQUIRE(portfolio.position() == 200);
-
-    twap.on_market_event(999, book, exchange, portfolio);
-    REQUIRE(twap.slices_sent() == 1);  // not yet time for slice 2
-
-    twap.on_market_event(1000, book, exchange, portfolio);
-    REQUIRE(twap.slices_sent() == 2);
-
-    // Jump far ahead: catches up on all remaining slices in one call.
-    twap.on_market_event(10000, book, exchange, portfolio);
-    REQUIRE(twap.finished());
-    REQUIRE(twap.slices_sent() == 5);
-    REQUIRE(portfolio.position() == 1003);  // remainder landed in the final slice
-
-    // Further ticks after completion are no-ops.
-    twap.on_market_event(20000, book, exchange, portfolio);
-    REQUIRE(twap.slices_sent() == 5);
-    REQUIRE(portfolio.position() == 1003);
+TEST_CASE("GLFT does not quote before warm-up and calibration", "[strategy]") {
+    std::vector<MarketEvent> evs;
+    for (int i = 0; i < 50; ++i) evs.push_back(snap(i * 100'000, 1000, 1001));
+    VectorSource src(inst(), evs);
+    GlftMarketMaker mm;
+    BacktestConfig cfg;
+    cfg.quiet = true;
+    Backtester bt(src, mm, cfg);
+    auto r = bt.run();
+    REQUIRE(r.orders_sent == 0);
+    REQUIRE_FALSE(mm.calibrated());
 }
