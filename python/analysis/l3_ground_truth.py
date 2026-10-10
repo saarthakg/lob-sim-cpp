@@ -97,7 +97,9 @@ def main():
         with open(cap) as f0:
             snap0 = json.loads(f0.readline())["snapshot"]
         rows0 = snap0["bids"] + snap0["asks"]
-        dec = lambda x: len(x.split(".")[1].rstrip("0")) if "." in x else 0
+        # Printed precision, trailing zeros included (Bitstamp prints fixed
+        # decimals); stripping zeros would infer a too-coarse lot from round sizes.
+        dec = lambda x: len(x.split(".")[1]) if "." in x else 0
         if a.tick is None:
             a.tick = 10.0 ** -max(dec(r[0]) for r in rows0)
         if a.lot is None:
