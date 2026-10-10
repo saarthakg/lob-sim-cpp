@@ -11,3 +11,7 @@ __pycache__/
 *.a
 lob-sim-cpp-plan.md
 lob-sim-cpp-phase2.md
+
+# experiment outputs: keep summaries, not per-run artifacts
+results/**/runs/
+results/study_log.txt
