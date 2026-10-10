@@ -29,8 +29,16 @@ struct LatencyConfig {
     uint64_t seed         = 42;
 };
 
+// Which simulated venue our orders trade against.
+//   Auto     — exact-queue L3 exchange when the source carries order-level
+//              records, otherwise the L2 queue-model exchange.
+//   L2Queue  — always the queue-model ExchangeSim (also on L3 data, to compare).
+//   L3Exact  — L3ExchangeSim; requires an order-level source.
+enum class ExchangeModel { Auto, L2Queue, L3Exact };
+
 struct BacktestConfig {
     ExchangeConfig exchange;
+    ExchangeModel  exchange_model = ExchangeModel::Auto;
     LatencyConfig  latency;
     Qty            max_position = 0;      // lots; 0 = no gateway position limit
     int64_t        sample_us    = 1'000'000;  // equity/book sampling interval

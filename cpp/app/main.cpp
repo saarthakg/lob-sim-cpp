@@ -52,6 +52,8 @@ Exchange model
   --taker-fee-bps F                 default 5.5 (Bybit VIP0)
   --queue riskaverse|power|log      cancel-attribution queue model (default power)
   --queue-power N                   exponent for --queue power (default 2)
+  --exchange-model auto|l2|l3       auto: exact-queue L3 exchange on order-level
+                                    data (.l3bin), queue-model L2 exchange otherwise
   --no-cross-fill                   don't fill on the book crossing our price
                                     (only trade prints fill; ignored without trades)
 
@@ -285,6 +287,9 @@ static int run_replay(EventSource& src, const Args& a) {
                                                   : QueueModel::Kind::ProbPower;
     cfg.exchange.queue.power  = a.num("--queue-power", 2.0);
     cfg.exchange.fill_on_cross = !a.has("--no-cross-fill");
+    const std::string model = a.str("--exchange-model", "auto");
+    cfg.exchange_model = model == "l2" ? ExchangeModel::L2Queue
+                       : model == "l3" ? ExchangeModel::L3Exact : ExchangeModel::Auto;
     int64_t lat = static_cast<int64_t>(a.num("--latency-us", 0));
     cfg.latency.feed_us      = static_cast<int64_t>(a.num("--feed-latency-us", static_cast<double>(lat)));
     cfg.latency.entry_us     = static_cast<int64_t>(a.num("--entry-latency-us", static_cast<double>(lat)));
@@ -312,11 +317,14 @@ static int run_replay(EventSource& src, const Args& a) {
 
     if (!cfg.quiet) {
         std::printf("Instrument %s tick=%g lot=%g | strategy=%s order=%g max_pos=%g | fees maker=%.2fbp taker=%.2fbp | "
-                    "latency feed/entry/resp=%lld/%lld/%lldus | queue=%s%s\n",
+                    "latency feed/entry/resp=%lld/%lld/%lldus | exchange=%s queue=%s%s\n",
                     inst.symbol.c_str(), inst.tick_size, inst.lot_size, strat->name().c_str(),
                     inst.qty(order_qty), inst.qty(max_pos), cfg.exchange.fees.maker * 1e4,
                     cfg.exchange.fees.taker * 1e4, (long long)cfg.latency.feed_us,
-                    (long long)cfg.latency.entry_us, (long long)cfg.latency.response_us, q.c_str(),
+                    (long long)cfg.latency.entry_us, (long long)cfg.latency.response_us,
+                    (cfg.exchange_model == ExchangeModel::L3Exact ||
+                     (cfg.exchange_model == ExchangeModel::Auto && src.has_l3())) ? "L3-exact" : "L2-model",
+                    q.c_str(),
                     src.has_trades() ? "" : " | NO TRADES: fills from book crosses only");
     }
 

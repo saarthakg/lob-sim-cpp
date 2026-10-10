@@ -1,4 +1,5 @@
 #include "../../include/sim/backtester.hpp"
+#include "../../include/sim/l3_exchange_sim.hpp"
 #include "../../include/util/csv_writer.hpp"
 #include "../../include/util/json.hpp"
 #include "../../include/util/timer.hpp"
@@ -10,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 
 namespace {
 
@@ -54,7 +56,11 @@ Backtester::Backtester(EventSource& source, Strategy& strategy, BacktestConfig c
     // Without a trade feed, the only fill evidence is the book crossing our
     // price — force that on so a depth-only replay can fill at all.
     if (!src_.has_trades()) cfg_.exchange.fill_on_cross = true;
-    exch_ = std::make_unique<ExchangeSim>(inst_, cfg_.exchange);
+    const bool l3 = cfg_.exchange_model == ExchangeModel::L3Exact ||
+                    (cfg_.exchange_model == ExchangeModel::Auto && src_.has_l3());
+    if (l3 && !src_.has_l3()) throw std::runtime_error("L3 exchange model requires an order-level source");
+    if (l3) exch_ = std::make_unique<L3ExchangeSim>(inst_, cfg_.exchange);
+    else    exch_ = std::make_unique<ExchangeSim>(inst_, cfg_.exchange);
 }
 
 Backtester::~Backtester() = default;
