@@ -13,7 +13,7 @@ Reported per model (probes whose horizon runs past the end of data excluded):
   precision / recall  — of simulated fills that are real / of real fills simulated
   median |dt|         — fill-time error when both filled
 
-    python analysis/queue_model_validation.py --stems data/raw/bitstamp/bitstamp_btcusd_* --horizon-s 60
+    python analysis/queue_model_validation.py --stems data/raw/bitstamp/bitstamp_btcusd_* --horizons-s 5 15 60
 """
 import argparse
 import subprocess
@@ -53,7 +53,7 @@ def sim_fills(stem: Path, model_args, out_root: Path) -> pd.Series:
     return pd.Series(res)
 
 
-def score(truth: pd.DataFrame, sim: pd.Series, H: float) -> dict:
+def score(truth: pd.DataFrame, sim: pd.Series, H: float, horizon_s: float) -> dict:
     t = truth[~truth["censored"]].copy()
     t["sim_fill_ts"] = t["probe"].map(sim)
     true_f = t["true_fill_ts"].notna() & (t["true_fill_ts"] - t["ts"] <= H)
@@ -61,7 +61,11 @@ def score(truth: pd.DataFrame, sim: pd.Series, H: float) -> dict:
     both = true_f & sim_f
     dt = (t.loc[both, "sim_fill_ts"] - t.loc[both, "true_fill_ts"]) / 1e6
     return {
+        "horizon_s": horizon_s,
         "probes": len(t),
+        # share of true fills that came from prints at the probe's own price —
+        # the only fills where the queue model (not price movement) decides
+        "queue_driven_share": (t.loc[true_f, "true_cause"] == "trade_at_price").mean() if true_f.any() else np.nan,
         "true_fill_rate": true_f.mean(),
         "sim_fill_rate": sim_f.mean(),
         "rate_ratio": sim_f.mean() / true_f.mean() if true_f.mean() > 0 else np.nan,
@@ -76,10 +80,9 @@ def score(truth: pd.DataFrame, sim: pd.Series, H: float) -> dict:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stems", nargs="+", required=True, help="paths without .v2.csv/.truth.csv suffix")
-    ap.add_argument("--horizon-s", type=float, default=60)
+    ap.add_argument("--horizons-s", type=float, nargs="+", default=[5, 15, 60])
     ap.add_argument("--out", default=str(ROOT / "results" / "queue_validation"))
     a = ap.parse_args()
-    H = a.horizon_s * 1e6
     out_root = Path(a.out)
     out_root.mkdir(parents=True, exist_ok=True)
 
@@ -89,21 +92,22 @@ def main():
         truth = pd.read_csv(f"{stem}.truth.csv")
         for name, args in MODELS.items():
             sim = sim_fills(stem, args, out_root / "runs" / stem.name / name.replace(" ", "_").replace(",", ""))
-            r = score(truth, sim, H)
-            r.update({"capture": stem.name, "model": name})
-            rows.append(r)
-            print(f"{stem.name:40s} {name:24s} true {r['true_fill_rate']:.3f} sim {r['sim_fill_rate']:.3f} "
-                  f"acc {r['accuracy']:.3f} prec {r['precision']:.3f} rec {r['recall']:.3f} "
-                  f"|dt| {r['median_abs_dt_s']:.2f}s", flush=True)
+            for hs in a.horizons_s:
+                r = score(truth, sim, hs * 1e6, hs)
+                r.update({"capture": stem.name, "model": name})
+                rows.append(r)
+                print(f"{stem.name:32s} H={hs:>3.0f}s {name:24s} true {r['true_fill_rate']:.3f} "
+                      f"sim {r['sim_fill_rate']:.3f} acc {r['accuracy']:.3f} prec {r['precision']:.3f} "
+                      f"rec {r['recall']:.3f} queue-driven {r['queue_driven_share']:.2f}", flush=True)
     df = pd.DataFrame(rows)
     df.to_csv(out_root / "validation.csv", index=False)
-    cols = ["capture", "model", "probes", "true_fill_rate", "sim_fill_rate", "rate_ratio", "accuracy",
-            "precision", "recall", "median_abs_dt_s"]
+    cols = ["capture", "horizon_s", "model", "probes", "queue_driven_share", "true_fill_rate", "sim_fill_rate",
+            "rate_ratio", "accuracy", "precision", "recall", "median_abs_dt_s"]
     md = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
     for _, r in df[cols].iterrows():
         md.append("| " + " | ".join(f"{v:.3f}" if isinstance(v, float) else str(v) for v in r) + " |")
     (out_root / "VALIDATION.md").write_text(
-        f"# Queue-model validation against Bitstamp L3 ground truth (horizon {a.horizon_s:.0f}s)\n\n" + "\n".join(md) + "\n")
+        "# Queue-model validation against Bitstamp L3 ground truth\n\n" + "\n".join(md) + "\n")
     print(f"wrote {out_root / 'VALIDATION.md'}")
 
 
