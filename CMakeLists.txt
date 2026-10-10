@@ -57,9 +57,14 @@ add_library(lob_core STATIC ${LOB_CORE_SRCS})
 target_include_directories(lob_core PUBLIC cpp/include)
 target_link_libraries(lob_core PUBLIC nlohmann_json::nlohmann_json)
 
+# ── lob_live: real-time market data (networking kept out of lob_core) ─────────
+file(GLOB LOB_LIVE_SRCS "cpp/src/live/*.cpp")
+add_library(lob_live STATIC ${LOB_LIVE_SRCS})
+target_link_libraries(lob_live PUBLIC lob_core ixwebsocket)
+
 # ── lob_sim executable ────────────────────────────────────────────────────────
 add_executable(lob_sim cpp/app/main.cpp)
-target_link_libraries(lob_sim PRIVATE lob_core ixwebsocket)
+target_link_libraries(lob_sim PRIVATE lob_live)
 
 # ── lob_tests executable ─────────────────────────────────────────────────────
 file(GLOB TEST_SRCS "cpp/tests/*.cpp")
