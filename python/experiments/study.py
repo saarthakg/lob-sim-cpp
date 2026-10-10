@@ -87,12 +87,31 @@ def selected_params(out: Path) -> str:
     return ""
 
 
+# Stage 2: the stage-1 selections sat on the edge of their grids (GLFT always
+# picked the widest half-spread, the ladder the strongest alpha), so the grid
+# is extended in those directions — same train/test protocol, new tag.
+GRIDS_EXT = {
+    "glft": {"--alpha-scale": [0, 1, 2], "--levels": [1, 3], "--half-spread-mult": [2, 3, 5, 8],
+             "--depletion-pull": [0.3]},
+    "ladder": {"--alpha-scale": [2, 3, 5], "--pull-threshold": [0.05, 0.15, 0.3], "--levels": [2, 4],
+               "--depletion-pull": [0.3], "--inventory-skew": [0, 0.05]},
+}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", nargs="*", default=None)
     ap.add_argument("--skip-sensitivity", action="store_true")
+    ap.add_argument("--extended", action="store_true", help="run only the stage-2 extended grids")
     args = ap.parse_args()
     syms = args.only or list(SYMBOLS)
+
+    if args.extended:
+        for sym in syms:
+            for strat in ["glft"] + (["ladder"] if SYMBOLS[sym]["large_tick"] else []):
+                for fee in ["vip0", "rebate"]:
+                    run(sym, strat, fee, grid=GRIDS_EXT[strat], tag="_ext")
+        return 0
 
     for sym in syms:
         strats = ["naive", "glft"] + (["ladder"] if SYMBOLS[sym]["large_tick"] else [])

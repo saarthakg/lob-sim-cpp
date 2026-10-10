@@ -89,10 +89,10 @@ def main():
     PLOTS.mkdir(parents=True, exist_ok=True)
     df = load()
     cfg = per_config(df)
-    main_ = cfg[cfg["tag"] == ""].copy()
+    main_ = cfg[cfg["tag"].isin(["", "_ext"])].copy()
+    main_["strat"] = main_["strat"] + main_["tag"].str.replace("_ext", " (ext grid)")
     main_["fee_label"] = main_["fee"].map(FEE_LABEL)
-    order = {"naive": 0, "glft": 1, "ladder": 2}
-    main_ = main_.sort_values(["sym", "fee", "strat"], key=lambda s: s.map(order) if s.name == "strat" else s)
+    main_ = main_.sort_values(["sym", "fee", "strat"])
 
     md = ["# Walk-forward study — out-of-sample (test-day) results\n",
           "Parameters selected on 4 training days (2026-09-28 → 10-01), evaluated once on 4 test days "
@@ -102,7 +102,7 @@ def main():
                         ["symbol", "strategy", "maker fee", "selected params", "net $/day", "% days > 0",
                          "net bp", "gross bp (= break-even maker fee)", "edge at fill bp",
                          "markout 5s bp", "fills/day", "max DD $"]))
-    sens = cfg[cfg["tag"] != ""].copy()
+    sens = cfg[~cfg["tag"].isin(["", "_ext"])].copy()
     if len(sens):
         md.append("\n\n## Sensitivity of the selected configurations (test days)\n")
         md.append(fmt_table(sens.sort_values(["sym", "fee", "tag"]),
@@ -114,7 +114,7 @@ def main():
     print("\n".join(md))
 
     # Figure 1: gross bp (= break-even maker fee) per symbol/strategy vs fee tiers.
-    piv = main_[main_["fee"] == "vip0"].pivot_table(index="sym", columns="strat", values="gross_bps")
+    piv = main_[(main_["fee"] == "vip0") & (main_["tag"] == "")].pivot_table(index="sym", columns="strat", values="gross_bps")
     piv = piv.reindex(columns=[c for c in ["naive", "glft", "ladder"] if c in piv.columns])
     fig, ax = plt.subplots(figsize=(9, 4.2))
     xs = np.arange(len(piv.index))
