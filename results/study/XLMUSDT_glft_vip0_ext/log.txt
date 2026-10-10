@@ -1,0 +1,27 @@
+[train] 24 parameter sets x 4 days
+                                                                         mean     std     min  count
+param_id params                                                                                     
+7        alpha-scale=0 levels=3 half-spread-mult=8 depletion-pull=0.3  15.218  43.886  -9.470      4
+3        alpha-scale=0 levels=1 half-spread-mult=8 depletion-pull=0.3   8.539  32.528  -9.470      4
+14       alpha-scale=1 levels=3 half-spread-mult=5 depletion-pull=0.3   7.766  48.340 -54.157      4
+22       alpha-scale=2 levels=3 half-spread-mult=5 depletion-pull=0.3   6.449  48.202 -46.374      4
+15       alpha-scale=1 levels=3 half-spread-mult=8 depletion-pull=0.3   6.048  25.390  -9.075      4
+23       alpha-scale=2 levels=3 half-spread-mult=8 depletion-pull=0.3   5.002  28.848 -19.479      4
+11       alpha-scale=1 levels=1 half-spread-mult=8 depletion-pull=0.3   3.269  21.777  -9.075      4
+6        alpha-scale=0 levels=3 half-spread-mult=5 depletion-pull=0.3   2.301  27.125 -23.421      4
+19       alpha-scale=2 levels=1 half-spread-mult=8 depletion-pull=0.3   0.970  21.650 -19.479      4
+5        alpha-scale=0 levels=3 half-spread-mult=3 depletion-pull=0.3   0.500  46.670 -41.796      4
+[select] alpha-scale=0 levels=3 half-spread-mult=8 depletion-pull=0.3
+[test] 1 parameter sets x 4 days
+       day split                                                       params  maker_fills  taker_fills  notional  gross_pnl  fees  net_pnl  net_pnl_flat  net_bps_of_notional  edge  markout_5s  max_drawdown  max_abs_position
+2026-10-02  test alpha-scale=0 levels=3 half-spread-mult=8 depletion-pull=0.3           14            0    1527.2      34.65  0.31    34.34         34.18               224.89  3.15       -5.35          9.60            3000.0
+2026-10-03  test alpha-scale=0 levels=3 half-spread-mult=8 depletion-pull=0.3            9            0    1291.3      -4.50  0.26    -4.76         -5.43               -36.85  2.00       -0.40          9.59            5000.0
+2026-10-04  test alpha-scale=0 levels=3 half-spread-mult=8 depletion-pull=0.3            8            0     219.7      -4.35  0.04    -4.39         -4.57              -200.00  0.45        0.05          5.40            1000.0
+2026-10-05  test alpha-scale=0 levels=3 half-spread-mult=8 depletion-pull=0.3            5            0     434.5       9.50  0.09     9.41          9.41               216.64  0.40       -0.10          1.40            1000.0
+
+Test-day net PnL by parameter set: mean / std / % days positive / total
+                                                              mean    std  pct_pos  total
+params                                                                                   
+alpha-scale=0 levels=3 half-spread-mult=8 depletion-pull=0.3  8.65  18.36     50.0  34.61
+
+wrote /Users/saarthakgupta/code/Finance Project/lob-sim-cpp/results/study/XLMUSDT_glft_vip0_ext/results.csv
