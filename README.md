@@ -1,5 +1,7 @@
 # lob-sim-cpp
 
+[![CI](https://github.com/saarthakg/lob-sim-cpp/actions/workflows/ci.yml/badge.svg)](https://github.com/saarthakg/lob-sim-cpp/actions/workflows/ci.yml)
+
 A **C++ limit-order-book engine and market-making research platform**:
 event-driven replay of full exchange order books, a matching simulator with an
 explicit queue-position model and three latency channels, literature-based
@@ -8,9 +10,9 @@ itself. It runs entirely on **free public data**.
 
 | | |
 |---|---|
-| **Speed** | Order-level (L3) book at **50M msgs/s, 18 ns p50 / 46 ns p99 per operation**, 5× a `std::map`/`std::list` book. **Live tick-to-trade of 8.2 µs p50 / 22 µs p99** on Bybit's real-time feed (WebSocket thread → lock-free ring → engine). A full day of BTCUSDT replays in about 2.5 s straight from compressed exchange archives. |
+| **Speed** | Order-level (L3) book at **50M msgs/s, 18 ns p50 / 46 ns p99 per operation**, 5× a `std::map`/`std::list` book. A **full Nasdaq ITCH 5.0 day** (268.7M messages, 8,892 symbols) rebuilds every order book in 22 s of compute. **Live tick-to-trade of 8.2 µs p50 / 22 µs p99** on Bybit's real-time feed (WebSocket thread → lock-free ring → engine). |
 | **Fidelity** | On order-level data, our simulated orders sit in the **real FIFO queue**. Against independent L3 ground truth the exact-queue exchange matches real fills with 0.996 accuracy and 1.000 precision. On L2-only data, a queue model is used instead; it is calibrated against the same ground truth (fill rates within 3%). Feed, order-entry and response latency are modelled separately, so stale quotes really do get picked off. |
-| **Rigour** | Walk-forward parameter selection; 16 out-of-sample days; sensitivity sweeps over latency, queue model and fill rule; and a **pre-registered** confirmation test on 30 untouched days. |
+| **Rigour** | Walk-forward parameter selection; 16 out-of-sample days; sensitivity sweeps over latency, queue model and fill rule; and a **pre-registered** confirmation test on 30 untouched days. CI on GCC, Clang and AppleClang, with ASan/UBSan and TSan jobs. |
 
 **What the platform found** ([Results](#results)):
 
@@ -43,6 +45,7 @@ itself. It runs entirely on **free public data**.
 
 - [Quickstart](#quickstart)
 - [Order-level (L3) engine](#order-level-l3-engine)
+- [Nasdaq ITCH 5.0 replay](#nasdaq-itch-50-replay)
 - [Live paper-trading runtime](#live-paper-trading-runtime)
 - [How the simulator works](#how-the-simulator-works)
 - [Strategies](#strategies)
@@ -60,7 +63,7 @@ itself. It runs entirely on **free public data**.
 # build (macOS: if the system CLT is broken, use Homebrew LLVM — see docs/architecture.md)
 cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
 cmake --build build -j
-./build/lob_tests                                   # 59 test cases
+./build/lob_tests                                   # 89 test cases
 
 # data: one day of Bybit BTCUSDT book (~200 MB) + trades (~12 MB)
 python3 -m venv python/.venv && python/.venv/bin/python -m pip install -r python/requirements.txt
@@ -78,9 +81,28 @@ python/.venv/bin/python python/data/download_bybit.py --symbol BTCUSDT --start 2
 python/.venv/bin/python python/analysis/run_report.py --run data/processed/glft_demo --save
 ```
 
+The order-level engine, ITCH replay and live runtime:
+
+```bash
+./build/lob_bench_l3                                # L3 book vs std::map/std::list book
+
+# record Bitstamp's public order-level feed, convert, replay with exact queue priority
+python/.venv/bin/python python/data/capture_bitstamp_l3.py --pairs btcusd --minutes 30
+./build/lob_sim --convert-bitstamp-l3 data/raw/bitstamp/<capture>.l3.jsonl --output btc.l3bin
+./build/lob_sim --replay-l3 btc.l3bin                               # book-only throughput + consistency
+./build/lob_sim --replay btc.l3bin --strategy naive --quote-on-book # exact-queue backtest
+
+# a full Nasdaq day (free sample: emi.nasdaq.com/ITCH/Nasdaq ITCH/12302019.NASDAQ_ITCH50.gz)
+./build/lob_sim --replay-itch 12302019.NASDAQ_ITCH50.gz --snapshot-time 10:30:00 --symbols AAPL,MSFT
+
+# live paper trading on Bybit's real-time feed, with latency percentiles
+./build/lob_sim --live bybit --symbol BTCUSDT --minutes 10 --strategy naive \
+                --order-size 0.001 --max-position 0.01 --quote-on-book
+```
+
 Run `./build/lob_sim --help` for every option: fees (negative = rebate), queue
-model, the fill-model bracket, per-channel latency and jitter, and strategy
-parameters.
+model, exchange model, the fill-model bracket, per-channel latency and jitter,
+and strategy parameters.
 
 ---
 
@@ -148,6 +170,41 @@ under both exchanges:
 - **What survives.** Every configuration is negative under both exchanges, so
   the conclusions hold. But the size of a market maker's edge can only be
   trusted with exact queue priority.
+
+---
+
+## Nasdaq ITCH 5.0 replay
+
+`itch::parse_itch` is a zero-copy decoder for Nasdaq TotalView-ITCH 5.0,
+the binary order-level feed of every Nasdaq-traded stock.
+
+- **Decoding.** Length-framed, big-endian messages are decoded in place and
+  dispatched to a templated handler: no virtual calls and no copies.
+- **Books.** `ItchBookBuilder` keeps one `L3Book` per symbol.
+- **Prices** use an exact, order-preserving piecewise scale: 1/10,000 USD
+  below $1, cents at or above $1. Sub-penny quotes are legal only below $1
+  (Reg NMS Rule 612), and the rule depends on the *order's* price, not the
+  stock's, so a $0.0001 stub bid on a $12 stock is kept exactly.
+
+**Nasdaq's free 2019-12-30 sample day** (8.25 GB uncompressed,
+[results/itch/2019-12-30_replay.txt](results/itch/2019-12-30_replay.txt)):
+
+| | |
+|---|---|
+| Messages | 268.7M: 118.6M adds, 114.4M deletes, 21.6M replaces, 5.8M executions, 2.8M partial cancels |
+| Books | 8,892 symbols, every one empty at end of feed (as it should be after the close) |
+| Consistency | 0 unknown order refs, 0 duplicate adds, 0 over-executions, 0 sub-penny prices ≥ $1 |
+| Compute (decode + book updates) | 21.7 s, i.e. **12.4M msgs/s (81 ns/msg)** |
+| End to end incl. disk | 24.0 s (11.2M msgs/s) |
+
+The full-market rate is below the single-book benchmark (18 ns/op). The
+profile shows the time spread across the book operations rather than any one
+hotspot: each message lands on a random one of ~9k books, so the working set
+far exceeds the CPU caches and the cost is memory latency.
+
+The 10:30 snapshot for AAPL, MSFT, AMZN, TSLA and QQQ in the results file
+matches where those names traded that morning: AAPL $286.37 × $286.40,
+MSFT $157.11 × $157.12.
 
 ---
 
@@ -592,13 +649,15 @@ The original simulator's headline numbers were artifacts. In order of impact:
 ## Repository layout
 
 ```
-cpp/include, cpp/src   core/ (OrderBook, L3Book, PriceLadder)  marketdata/ (sources, .l3bin)
+cpp/include, cpp/src   core/ (OrderBook, L3Book, PriceLadder)  marketdata/ (sources, .l3bin, ITCH 5.0)
                        sim/ (Backtester, ExchangeSim, L3ExchangeSim)  strategy/  util/ (FlatHashMap, ObjectPool)
 cpp/app, cpp/bench     lob_sim CLI; lob_bench (L2), lob_bench_l3 (order-level book)
 python/data            download_bybit.py, capture_bitstamp_l3.py (order-level capture)
 python/analysis        signal_research.py, l3_ground_truth.py, queue_model_validation.py, run_report.py
-python/experiments     run_backtests.py, study.py, summarize_study.py
-results/               study tables, fitted signals, taker/execution summary, queue validation
+python/experiments     run_backtests.py, study.py, summarize_study.py, extra_oos.py, confirm.py, l2_vs_l3.py
+results/               study tables, fitted signals, taker/execution, queue validation, L2-vs-L3,
+                       live latency sessions, ITCH replay, pre-registration + confirmation
+.github/workflows      CI: GCC/Clang/AppleClang builds + tests, ASan/UBSan, TSan
 docs/                  research_notes.md, assumptions.md, dataset.md, architecture.md
 ```
 
