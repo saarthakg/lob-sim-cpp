@@ -91,7 +91,6 @@ private:
     Instrument     inst_;
     ExchangeConfig cfg_;
     std::unordered_map<OrderId, Resting> resting_;
-    std::unordered_map<Price, Qty> scratch_bids_, scratch_asks_;
     std::vector<OrderId> scratch_ids_;
 
     void fill_passive(Resting& r, Qty qty, Price px, Timestamp ts, Portfolio& pf,

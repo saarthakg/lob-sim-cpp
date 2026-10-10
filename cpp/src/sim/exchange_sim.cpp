@@ -63,32 +63,30 @@ Qty ExchangeSim::take_liquidity(const OrderRequest& req, Qty qty, Price limit, b
                                 Timestamp ts, const OrderBook& book, Portfolio& pf,
                                 Qty already_filled, std::vector<ExecutionReport>& out) {
     Qty filled = 0;
-    auto sweep = [&](const auto& levels) {
-        for (const auto& [px, lvl_qty] : levels) {
-            if (filled >= qty) break;
-            if (has_limit) {
-                if (req.side == Side::Bid && px > limit) break;
-                if (req.side == Side::Ask && px < limit) break;
-            }
-            Qty f = std::min(qty - filled, lvl_qty);
-            if (f <= 0) continue;
-            filled += f;
-            double fee = inst_.notional(px, f) * cfg_.fees.taker;
-            pf.on_fill(req.side, px, f, fee);
-            ExecutionReport r = base_report(req, ts);
-            r.fill_price = px;
-            r.fill_qty   = f;
-            r.cum_qty    = already_filled + filled;
-            r.leaves_qty = req.qty - r.cum_qty;
-            r.fee        = fee;
-            r.liquidity  = Liquidity::Taker;
-            r.cause      = FillCause::Taker;
-            r.status     = (r.leaves_qty == 0) ? OrderStatus::Filled : OrderStatus::PartiallyFilled;
-            out.push_back(r);
+    // Buying walks the asks, selling walks the bids, best price first.
+    book.for_each_level(req.side == Side::Bid ? Side::Ask : Side::Bid, [&](Price px, Qty lvl_qty) {
+        if (filled >= qty) return false;
+        if (has_limit) {
+            if (req.side == Side::Bid && px > limit) return false;
+            if (req.side == Side::Ask && px < limit) return false;
         }
-    };
-    if (req.side == Side::Bid) sweep(book.asks());
-    else                       sweep(book.bids());
+        Qty f = std::min(qty - filled, lvl_qty);
+        if (f <= 0) return true;
+        filled += f;
+        double fee = inst_.notional(px, f) * cfg_.fees.taker;
+        pf.on_fill(req.side, px, f, fee);
+        ExecutionReport r = base_report(req, ts);
+        r.fill_price = px;
+        r.fill_qty   = f;
+        r.cum_qty    = already_filled + filled;
+        r.leaves_qty = req.qty - r.cum_qty;
+        r.fee        = fee;
+        r.liquidity  = Liquidity::Taker;
+        r.cause      = FillCause::Taker;
+        r.status     = (r.leaves_qty == 0) ? OrderStatus::Filled : OrderStatus::PartiallyFilled;
+        out.push_back(r);
+        return true;
+    });
     return filled;
 }
 
@@ -255,12 +253,6 @@ void ExchangeSim::on_depth(const MarketEvent& ev, const OrderBook& book, Portfol
     if (resting_.empty()) return;
 
     const bool snapshot = (ev.type == EventType::Snapshot);
-    if (!snapshot) {
-        scratch_bids_.clear();
-        scratch_asks_.clear();
-        for (const auto& l : ev.bids) scratch_bids_[l.price] = l.qty;
-        for (const auto& l : ev.asks) scratch_asks_[l.price] = l.qty;
-    }
 
     auto bb = book.best_bid();
     auto ba = book.best_ask();
@@ -273,11 +265,14 @@ void ExchangeSim::on_depth(const MarketEvent& ev, const OrderBook& book, Portfol
         if (snapshot) {
             new_qty = static_cast<double>(book.visible_qty_at_price(req.side, req.price));
         } else {
-            auto& m  = (req.side == Side::Bid) ? scratch_bids_ : scratch_asks_;
-            auto  it = m.find(req.price);
-            if (it != m.end()) {
-                touched = true;
-                new_qty = static_cast<double>(it->second);
+            // A handful of resting orders against tens of changed levels: a
+            // linear scan beats building a hash map of the delta every event.
+            const auto& lv = (req.side == Side::Bid) ? ev.bids : ev.asks;
+            for (const auto& l : lv) {
+                if (l.price == req.price) {
+                    touched = true;
+                    new_qty = static_cast<double>(l.qty);   // last update for a price wins
+                }
             }
         }
 
