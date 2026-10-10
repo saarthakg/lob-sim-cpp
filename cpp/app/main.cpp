@@ -1,5 +1,6 @@
 #include "../include/core/l3_book.hpp"
 #include "../include/core/order_book.hpp"
+#include "../include/live/live_bybit_source.hpp"
 #include "../include/marketdata/l3_format.hpp"
 #include "../include/marketdata/event_source.hpp"
 #include "../include/marketdata/parser.hpp"
@@ -13,6 +14,8 @@
 #include "../include/util/timer.hpp"
 #include "live_capture.hpp"
 
+#include <atomic>
+#include <csignal>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
@@ -35,6 +38,11 @@ Modes
   --stats <book> [--trades <trades>]
         Data profile: instrument, spread distribution (ticks and bps), trade
         flow, and the break-even arithmetic for passive quoting at given fees.
+  --live bybit --symbol SYM [--minutes N] [--depth 1|50|200] [--strategy ...]
+        Live paper trading: the backtester runs on Bybit's real-time public
+        feed (market-data thread -> lock-free ring -> engine thread), with
+        orders matched by the simulated exchange. Reports receive->engine and
+        tick->trade latency percentiles. Ctrl+C stops early.
   --live-capture <SYMBOL> --output <csv> [--exchange bybit|binance] [--duration-minutes N]
   --load-snapshot <binance_rest_snapshot.json>
   --convert-bitstamp-l3 <capture.l3.jsonl> --output <file.l3bin>
@@ -273,6 +281,17 @@ public:
     std::string name() const override { return "None"; }
 };
 
+static std::atomic<LiveBybitSource*> g_live{nullptr};
+static void live_sigint(int) {
+    if (LiveBybitSource* s = g_live.load()) s->stop();
+}
+
+static void print_latency(const char* name, const RunSummary::Pctl& p) {
+    if (!p.n) return;
+    std::printf("  %-16s n=%-8zu p50 %7.1f us  p90 %7.1f us  p99 %7.1f us  p99.9 %8.1f us  max %8.1f us\n", name,
+                p.n, p.p50 / 1e3, p.p90 / 1e3, p.p99 / 1e3, p.p999 / 1e3, p.max / 1e3);
+}
+
 static int run_replay(EventSource& src, const Args& a) {
     const Instrument& inst = src.instrument();
     const std::string strat_name = a.str("--strategy", "");
@@ -350,6 +369,12 @@ static int run_replay(EventSource& src, const Args& a) {
                     s.markout[1], s.markout[2], s.markout[4], s.markout[5]);
         std::printf("Risk   max |pos| %.4f, mean |pos| %.4f, final pos %.4f, max DD %.2f\n", s.max_abs_position,
                     s.mean_abs_position, s.final_position, s.max_drawdown);
+        if (s.recv_to_engine.n) {
+            std::printf("Latency (live, local monotonic clock)\n");
+            print_latency("recv->engine", s.recv_to_engine);
+            print_latency("tick->trade", s.tick_to_trade);
+            print_latency("engine->trade", s.engine_to_trade);
+        }
         if (auto* tw = dynamic_cast<TwapStrategy*>(strat.get())) {
             double arr = tw->arrival_mid(), avg = tw->avg_fill_px();
             double sign = a.str("--side", "buy") == "sell" ? -1.0 : 1.0;
@@ -453,6 +478,28 @@ int main(int argc, char** argv) {
             run_live_capture(a.str("--live-capture"), static_cast<int>(a.num("--duration-minutes", 60)),
                              a.str("--output"), a.str("--exchange", "bybit"));
             return 0;
+        }
+        if (a.has("--live")) {
+            LiveBybitSource::Config lc;
+            lc.symbol     = a.str("--symbol", "BTCUSDT");
+            lc.depth      = static_cast<int>(a.num("--depth", 50));
+            lc.duration_s = a.num("--minutes", 10) * 60.0;
+            lc.tick_size  = a.num("--tick-size", 0.0);
+            lc.lot_size   = a.num("--lot-size", 0.0);
+            std::printf("Connecting to Bybit %s orderbook.%d + publicTrade for %.0f min (paper trading)...\n",
+                        lc.symbol.c_str(), lc.depth, lc.duration_s / 60.0);
+            LiveBybitSource live(lc);
+            g_live.store(&live);
+            std::signal(SIGINT, live_sigint);
+            int rc = run_replay(live, a);
+            g_live.store(nullptr);
+            auto st = live.shutdown_and_stats();
+            std::printf("Feed: %llu frames (%llu book, %llu trades), parse p50 %.1f us p99 %.1f us, "
+                        "ring overruns %llu, connections %llu\n",
+                        (unsigned long long)st.frames, (unsigned long long)st.book_msgs,
+                        (unsigned long long)st.trades, st.parse_p50_ns / 1e3, st.parse_p99_ns / 1e3,
+                        (unsigned long long)st.overruns, (unsigned long long)st.opens);
+            return rc;
         }
         std::string book_path = a.has("--stats") ? a.str("--stats") : a.str("--replay");
         if (book_path.empty()) { print_help(); return 1; }
