@@ -91,7 +91,7 @@ static double bench_backtest(const std::vector<MarketEvent>& events) {
 
 int main() {
     constexpr size_t N = 1'000'000;
-    std::printf("%-8s %-28s %-28s %-28s\n", "depth", "std::map book (M ev/s)", "sorted-vector book (M ev/s)",
+    std::printf("%-8s %-28s %-28s %-28s\n", "depth", "OrderBook ladder (M ev/s)", "sorted-vector book (M ev/s)",
                 "backtest + NaiveMM (M ev/s)");
     for (int depth : {20, 200}) {
         auto events = generate_events(N, depth);

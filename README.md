@@ -201,7 +201,7 @@ dedicated host.
 | **Latency** | Three channels. **Feed:** the strategy sees a delayed book. **Entry:** orders *and cancels* land late, so stale quotes get picked off and late cancels come back `CancelRejected`. **Response:** the strategy's view of its own position lags. Optional lognormal jitter. |
 | **Orders** | Post-only, GTC, IOC and market. A local gateway refuses self-crosses and position-limit breaches. Maker and taker fees are separate; negative fees are rebates. |
 | **Attribution** | Every fill records the mid at fill and at +0.1 s, 1 s, 5 s, 30 s, 60 s and 300 s. `edge` is the spread captured at the fill instant; markout minus edge is adverse selection; gross PnL in bp of notional is the break-even maker fee. Also reported: net PnL after the cost of flattening, drawdown, inventory and quote uptime. |
-| **Speed** | Book updates: 12.1M/s (`std::map`) and 15.9M/s (sorted vector) at 20 levels; 7.9M/s and 9.6M/s at 200 levels. Full backtest loop with a strategy: 1.7–2.2M events/s (`lob_bench`, synthetic). A real BTCUSDT day (860k book updates, 320k trades) replays in about 2.5 s, streamed from the compressed files; decompression and JSON parsing are the bottleneck. |
+| **Speed** | L2 book updates: 33M/s (20 levels) and 62M/s (200 levels) on the bitmap price ladder, versus 12M/s and 8M/s for the original `std::map` book. Full backtest loop with a strategy: 5.7–6.2M events/s (`lob_bench`, synthetic). A real BTCUSDT day (860k book updates, 320k trades) replays in about 2.5 s from the compressed files; decompression and parsing are now the bottleneck. |
 
 ---
 
