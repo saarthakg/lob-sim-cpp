@@ -33,17 +33,32 @@ MODELS = {
     "power3": ["--queue", "power", "--queue-power", "3"],
     "log": ["--queue", "log"],
     "power2, no cross-fill": ["--queue", "power", "--queue-power", "2", "--no-cross-fill"],
+    # Not a queue model: the exact-queue exchange on the order-level replay
+    # (.l3bin), where our probe sits in the real FIFO.
+    "L3 exact (order-level)": ["L3"],
 }
+
+
+def ensure_l3bin(stem: Path) -> Path:
+    l3bin = Path(f"{stem}.l3bin")
+    if not l3bin.exists():
+        subprocess.run([str(BIN), "--convert-bitstamp-l3", f"{stem}.l3.jsonl", "--output", str(l3bin)],
+                       check=True, capture_output=True)
+    return l3bin
 
 
 def sim_fills(stem: Path, model_args, out_root: Path) -> pd.Series:
     """probe id -> first simulated fill ts (NaN if never)."""
     res = {}
+    if model_args == ["L3"]:
+        replay, model_args = str(ensure_l3bin(stem)), ["--exchange-model", "l3"]
+    else:
+        replay = f"{stem}.v2.csv"
     for side, flag in (("bid", "buy"), ("ask", "sell")):
         out = out_root / side
-        cmd = [str(BIN), "--replay", f"{stem}.v2.csv", "--strategy", "probe", "--probes",
+        cmd = [str(BIN), "--replay", replay, "--strategy", "probe", "--probes",
                f"{stem}.probes_{side}.csv", "--side", flag, "--maker-fee-bps", "0", "--quiet",
-               "--output", str(out), *model_args]
+               "--no-book-metrics", "--output", str(out), *model_args]
         subprocess.run(cmd, check=True, capture_output=True)
         m = pd.read_csv(out / "probe_orders.csv")
         f = pd.read_csv(out / "fills.csv")
