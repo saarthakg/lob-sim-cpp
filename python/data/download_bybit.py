@@ -43,10 +43,20 @@ def fetch(url: str, dest: Path) -> None:
 
 
 def list_book_files(sym: str, start: str, end: str) -> list:
-    req = urllib.request.Request(LIST_URL.format(sym=sym, start=start, end=end), headers=UA)
-    with urllib.request.urlopen(req, timeout=60) as r:
-        payload = json.load(r)
-    return payload.get("result", {}).get("list", []) or []
+    """The listing API rejects ranges longer than 7 days (ret_code 10016),
+    so query in weekly chunks and fail loudly on any error."""
+    out = []
+    d, last = date.fromisoformat(start), date.fromisoformat(end)
+    while d <= last:
+        chunk_end = min(d + timedelta(days=6), last)
+        url = LIST_URL.format(sym=sym, start=d.isoformat(), end=chunk_end.isoformat())
+        with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=60) as r:
+            payload = json.load(r)
+        if payload.get("ret_code") != 0:
+            raise RuntimeError(f"list-files {d}..{chunk_end}: {payload.get('ret_msg')} ({payload.get('ret_code')})")
+        out += payload.get("result", {}).get("list", []) or []
+        d = chunk_end + timedelta(days=1)
+    return out
 
 
 def main() -> int:
