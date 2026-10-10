@@ -19,6 +19,8 @@ public:
     virtual bool next(MarketEvent& ev) = 0;
     virtual const Instrument& instrument() const = 0;
     virtual bool has_trades() const = 0;
+    // True if events carry order-level (L3) records.
+    virtual bool has_l3() const { return false; }
 };
 
 // Reads text lines from a plain file, or transparently decompresses `.gz`
@@ -150,6 +152,32 @@ private:
                       Price& px, Qty& qty) const;
 };
 
+// ── Order-level (L3) binary file ─────────────────────────────────────────────
+//
+// Replays an .l3bin file (see l3_format.hpp). Each order event becomes a Delta
+// for its one price level (the level's new aggregate size, from an internal
+// market-only L3Book) with the raw record attached; each trade print becomes a
+// Trade event, also with its record. Strategies therefore see the same L2 +
+// trades stream as from any other source, while an L3ExchangeSim can follow
+// individual orders.
+class L3FileReader;
+class L3Book;
+class L3EventSource : public EventSource {
+public:
+    explicit L3EventSource(const std::string& path);
+    ~L3EventSource() override;
+
+    bool next(MarketEvent& ev) override;
+    const Instrument& instrument() const override { return inst_; }
+    bool has_trades() const override { return true; }
+    bool has_l3() const override { return true; }
+
+private:
+    std::unique_ptr<L3FileReader> reader_;
+    std::unique_ptr<L3Book> book_;
+    Instrument inst_;
+};
+
 // In-memory source, used by tests and the benchmark.
 class VectorSource : public EventSource {
 public:
@@ -171,7 +199,8 @@ private:
 };
 
 // Picks a source from file names: *.data / *.data.zip → Bybit historical
-// (trades_path optional); anything else → NormalizedCsvSource.
+// (trades_path optional); *.l3bin → L3EventSource; anything else →
+// NormalizedCsvSource.
 std::unique_ptr<EventSource> open_event_source(const std::string& path,
                                                const std::string& trades_path,
                                                double tick_size = 0.0,

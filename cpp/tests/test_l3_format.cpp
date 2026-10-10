@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include "../include/core/l3_book.hpp"
+#include "../include/marketdata/event_source.hpp"
 #include "../include/marketdata/l3_format.hpp"
 
 #include <cstdio>
@@ -54,5 +55,40 @@ TEST_CASE("Bitstamp L3 capture converts and replays into the expected book", "[l
     REQUIRE(book.level_orders(Side::Bid, 10000) == 1);
     REQUIRE(book.contains(10));
     std::remove(cap.c_str());
+    std::remove(bin.c_str());
+}
+
+TEST_CASE("L3EventSource emits per-level deltas and trades with the raw record attached", "[l3format]") {
+    const std::string bin = (fs::temp_directory_path() / "lobsim_src_test.l3bin").string();
+    {
+        L3FileWriter w(bin, "X", 0.01, 1e-8);
+        auto rec = [](int64_t ts, L3Type t, uint64_t id, uint8_t side, Price p, Qty q) {
+            L3Record r{};
+            r.ts = ts; r.type = static_cast<uint8_t>(t); r.id = id; r.side = side; r.price = p; r.qty = q;
+            return r;
+        };
+        w.write(rec(1, L3Type::Add, 1, 0, 100, 5));
+        w.write(rec(2, L3Type::Add, 2, 0, 100, 7));
+        w.write(rec(3, L3Type::Modify, 1, 0, 100, 2));
+        w.write(rec(4, L3Type::Trade, 2, 1, 100, 3));   // sell aggressor hits order 2
+        w.write(rec(5, L3Type::Delete, 1, 0, 100, 0));
+    }
+    auto src = open_event_source(bin, "");
+    REQUIRE(src->has_l3());
+    REQUIRE(src->instrument().tick_size == 0.01);
+    MarketEvent ev;
+    std::vector<Qty> level_after;
+    while (src->next(ev)) {
+        REQUIRE(ev.has_l3);
+        if (ev.type == EventType::Trade) {
+            REQUIRE(ev.trade.aggressor == Side::Ask);
+            REQUIRE(ev.l3.id == 2);
+        } else {
+            REQUIRE(ev.bids.size() == 1);
+            level_after.push_back(ev.bids[0].qty);
+        }
+    }
+    // 5, 12, 9 (modify 5->2), then 7 after deleting order 1
+    REQUIRE(level_after == std::vector<Qty>{5, 12, 9, 7});
     std::remove(bin.c_str());
 }

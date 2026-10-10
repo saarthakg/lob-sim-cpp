@@ -1,4 +1,6 @@
 #include "../../include/marketdata/event_source.hpp"
+#include "../../include/core/l3_book.hpp"
+#include "../../include/marketdata/l3_format.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -403,6 +405,52 @@ bool NormalizedCsvSource::next(MarketEvent& ev) {
     }
 }
 
+// ── L3EventSource ────────────────────────────────────────────────────────────
+
+L3EventSource::L3EventSource(const std::string& path)
+    : reader_(std::make_unique<L3FileReader>(path)), book_(std::make_unique<L3Book>(18, 1 << 16)) {
+    const L3FileHeader& h = reader_->header();
+    inst_.symbol    = h.symbol;
+    inst_.tick_size = h.tick_size;
+    inst_.lot_size  = h.lot_size;
+}
+
+L3EventSource::~L3EventSource() = default;
+
+bool L3EventSource::next(MarketEvent& ev) {
+    const L3Record* r = reader_->next();
+    if (!r) return false;
+    ev.ts     = r->ts;
+    ev.has_l3 = true;
+    ev.l3     = *r;
+    ev.bids.clear();
+    ev.asks.clear();
+    const auto type = static_cast<L3Type>(r->type);
+    if (type == L3Type::Trade) {
+        ev.type  = EventType::Trade;
+        ev.trade = TradePrint{l3_side(r->side), r->price, r->qty};
+        return true;
+    }
+    // Order event: apply to the market-only book, then report its level's
+    // new aggregate size. Delete/Modify carry the order's price, but use the
+    // book's record of it in case the feed's copy differs.
+    Side side = l3_side(r->side);
+    Price px  = r->price;
+    if (const L3Book::Order* o = book_->find(r->id)) {
+        side = o->side;
+        px   = o->price;
+    }
+    switch (type) {
+        case L3Type::Add:    book_->add(r->id, side, px, r->qty); break;
+        case L3Type::Delete: book_->cancel(r->id); break;
+        case L3Type::Modify: book_->modify(r->id, r->qty); break;
+        default: break;
+    }
+    ev.type = EventType::Delta;
+    (side == Side::Bid ? ev.bids : ev.asks).push_back({px, book_->level_qty(side, px)});
+    return true;
+}
+
 // ── factory ──────────────────────────────────────────────────────────────────
 
 std::unique_ptr<EventSource> open_event_source(const std::string& path,
@@ -422,5 +470,6 @@ std::unique_ptr<EventSource> open_event_source(const std::string& path,
         if (u1 != std::string::npos && u2 != std::string::npos) c.symbol = base.substr(u1 + 1, u2 - u1 - 1);
         return std::make_unique<BybitHistoricalSource>(c);
     }
+    if (ends_with(path, ".l3bin")) return std::make_unique<L3EventSource>(path);
     return std::make_unique<NormalizedCsvSource>(path);
 }
