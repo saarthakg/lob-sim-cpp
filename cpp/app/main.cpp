@@ -287,6 +287,9 @@ static int run_replay(EventSource& src, const Args& a) {
     // Gateway limit: strategy limit plus room for a full ladder of resting orders.
     cfg.max_position = max_pos + order_qty * levels;
     if (strat_name == "probe") cfg.max_position = 0;  // probes accumulate by design
+    // An execution algo's parent quantity *is* its position limit.
+    if (strat_name == "twap")
+        cfg.max_position = order_qty * static_cast<Qty>(a.num("--slices", 20));
 
     std::unique_ptr<Strategy> strat;
     if (strat_name.empty() || strat_name == "none") {
