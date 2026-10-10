@@ -1,285 +1,293 @@
 #include "../../include/sim/exchange_sim.hpp"
-#include "../../include/core/types.hpp"
+
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 
-ExchangeSim::ExchangeSim(LatencyModel latency, double taker_fee, double maker_fee,
-                         Qty max_abs_position)
-    : latency_(latency), taker_fee_(taker_fee), maker_fee_(maker_fee),
-      max_abs_position_(max_abs_position) {}
-
-OrderId ExchangeSim::next_order_id() { return next_id_++; }
-
-bool ExchangeSim::breaches_risk_limit(Side side, Qty qty, const Portfolio& portfolio) const {
-    if (max_abs_position_ <= 0) return false;  // risk check disabled
-    Qty projected = portfolio.position() + (side == Side::Bid ? qty : -qty);
-    return std::llabs(static_cast<long long>(projected)) > max_abs_position_;
+double QueueModel::prob_behind(double front, double back) const {
+    front = std::max(front, 0.0);
+    back  = std::max(back, 0.0);
+    double fb = 0.0, ff = 0.0;
+    switch (kind) {
+        case Kind::RiskAverse: return 1.0;
+        case Kind::ProbPower:
+            fb = std::pow(back, power);
+            ff = std::pow(front, power);
+            break;
+        case Kind::ProbLog:
+            fb = std::log1p(back);
+            ff = std::log1p(front);
+            break;
+    }
+    if (fb + ff <= 0.0) return 1.0;
+    return fb / (fb + ff);
 }
 
-bool ExchangeSim::would_self_cross(const SimOrder& order) const {
-    auto crosses = [&](const SimOrder& resting) {
-        if (resting.strategy_name != order.strategy_name) return false;
-        if (resting.side == order.side) return false;
-        return (order.side == Side::Bid) ? (order.price >= resting.price)
-                                          : (order.price <= resting.price);
+ExchangeSim::ExchangeSim(Instrument inst, ExchangeConfig cfg)
+    : inst_(std::move(inst)), cfg_(cfg) {}
+
+const ExchangeSim::Resting* ExchangeSim::find(OrderId id) const {
+    auto it = resting_.find(id);
+    return it == resting_.end() ? nullptr : &it->second;
+}
+
+ExecutionReport ExchangeSim::base_report(const OrderRequest& req, Timestamp ts) const {
+    ExecutionReport r;
+    r.order_id   = req.order_id;
+    r.ts         = ts;
+    r.side       = req.side;
+    r.order_type = req.type;
+    r.price      = req.price;
+    return r;
+}
+
+Qty ExchangeSim::take_liquidity(const OrderRequest& req, Qty qty, Price limit, bool has_limit,
+                                Timestamp ts, const OrderBook& book, Portfolio& pf,
+                                Qty already_filled, std::vector<ExecutionReport>& out) {
+    Qty filled = 0;
+    auto sweep = [&](const auto& levels) {
+        for (const auto& [px, lvl_qty] : levels) {
+            if (filled >= qty) break;
+            if (has_limit) {
+                if (req.side == Side::Bid && px > limit) break;
+                if (req.side == Side::Ask && px < limit) break;
+            }
+            Qty f = std::min(qty - filled, lvl_qty);
+            if (f <= 0) continue;
+            filled += f;
+            double fee = inst_.notional(px, f) * cfg_.fees.taker;
+            pf.on_fill(req.side, px, f, fee);
+            ExecutionReport r = base_report(req, ts);
+            r.fill_price = px;
+            r.fill_qty   = f;
+            r.cum_qty    = already_filled + filled;
+            r.leaves_qty = req.qty - r.cum_qty;
+            r.fee        = fee;
+            r.liquidity  = Liquidity::Taker;
+            r.cause      = FillCause::Taker;
+            r.status     = (r.leaves_qty == 0) ? OrderStatus::Filled : OrderStatus::PartiallyFilled;
+            out.push_back(r);
+        }
     };
-    for (const auto& [oid, state] : passive_orders_) {
-        (void)oid;
-        if (crosses(state.order)) return true;
-    }
-    for (const auto& pending : pending_limit_orders_) {
-        if (crosses(pending.order)) return true;
-    }
-    return false;
+    if (req.side == Side::Bid) sweep(book.asks());
+    else                       sweep(book.bids());
+    return filled;
 }
 
-ExecutionReport ExchangeSim::execute_market_order_now(
-    const SimOrder& order, const OrderBook& book, Portfolio& portfolio) {
-
-    Qty remaining = order.qty;
-    int64_t total_cost = 0;
-    Qty total_filled   = 0;
-
-    // Walk the full visible book depth on the contra side.
-    auto levels = (order.side == Side::Bid)
-        ? book.top_n_asks(static_cast<int>(book.ask_levels()))   // buying: walk asks
-        : book.top_n_bids(static_cast<int>(book.bid_levels()));  // selling: walk bids
-
-    for (const auto& lvl : levels) {
-        if (remaining <= 0) break;
-        Qty fill_qty = std::min(remaining, lvl.qty);
-        total_cost  += lvl.price * fill_qty;
-        total_filled += fill_qty;
-        remaining    -= fill_qty;
+void ExchangeSim::on_new_order(const OrderRequest& req, Timestamp ts, const OrderBook& book,
+                               Portfolio& pf, std::vector<ExecutionReport>& out) {
+    if (req.qty <= 0) {
+        ExecutionReport r = base_report(req, ts);
+        r.status = OrderStatus::Rejected;
+        out.push_back(r);
+        return;
     }
 
-    ExecutionReport rep{};
-    rep.order_id      = order.order_id;
-    rep.ts            = order.ts;
-    rep.side          = order.side;
-    rep.order_type    = order.type;
-    rep.strategy_name = order.strategy_name;
-
-    if (total_filled == 0) {
-        // No liquidity
-        rep.status        = OrderStatus::Rejected;
-        rep.fill_price    = 0;
-        rep.fill_qty      = 0;
-        rep.remaining_qty = order.qty;
-        rep.fee_paid      = 0.0;
-        return rep;
+    if (req.type == OrderType::Market) {
+        Qty f = take_liquidity(req, req.qty, 0, false, ts, book, pf, 0, out);
+        if (f < req.qty) {
+            // Unfilled remainder of a market order is cancelled (IOC semantics).
+            ExecutionReport r = base_report(req, ts);
+            r.status     = (f == 0) ? OrderStatus::Rejected : OrderStatus::Cancelled;
+            r.cum_qty    = f;
+            r.leaves_qty = 0;
+            out.push_back(r);
+        }
+        return;
     }
 
-    Price avg_price = total_cost / total_filled;
-    double notional = (static_cast<double>(avg_price) / TICK_MULTIPLIER)
-                    * (static_cast<double>(total_filled) / TICK_MULTIPLIER);
-    double fee      = notional * taker_fee_;  // USD
+    auto bb = book.best_bid();
+    auto ba = book.best_ask();
+    bool crosses = (req.side == Side::Bid) ? (ba && req.price >= ba->price)
+                                           : (bb && req.price <= bb->price);
 
-    portfolio.on_fill(order.side, avg_price, total_filled, fee);
-
-    rep.status        = (remaining > 0) ? OrderStatus::PartiallyFilled : OrderStatus::Filled;
-    rep.fill_price    = avg_price;
-    rep.fill_qty      = total_filled;
-    rep.remaining_qty = remaining;
-    rep.fee_paid      = fee;
-    return rep;
-}
-
-std::vector<ExecutionReport> ExchangeSim::submit_market_order(
-    const SimOrder&  order,
-    const OrderBook& book,
-    Portfolio&       portfolio) {
-
-    if (breaches_risk_limit(order.side, order.qty, portfolio)) {
-        ExecutionReport rep{};
-        rep.order_id      = order.order_id;
-        rep.ts            = order.ts;
-        rep.side          = order.side;
-        rep.order_type    = order.type;
-        rep.status        = OrderStatus::Rejected;
-        rep.fill_price    = 0;
-        rep.fill_qty      = 0;
-        rep.remaining_qty = order.qty;
-        rep.fee_paid      = 0.0;
-        rep.strategy_name = order.strategy_name;
-        return {rep};
+    if (crosses && req.tif == TimeInForce::PostOnly) {
+        ExecutionReport r = base_report(req, ts);
+        r.status     = OrderStatus::Rejected;
+        r.leaves_qty = 0;
+        out.push_back(r);
+        return;
     }
 
-    if (latency_.total_us() == 0) {
-        ExecutionReport rep = execute_market_order_now(order, book, portfolio);
-        if (rep.status != OrderStatus::Rejected) pending_fills_.push_back(rep);
-        return {rep};
+    Qty taken = 0;
+    if (crosses) taken = take_liquidity(req, req.qty, req.price, true, ts, book, pf, 0, out);
+
+    if (req.tif == TimeInForce::IOC) {
+        if (taken < req.qty) {
+            ExecutionReport r = base_report(req, ts);
+            r.status     = (taken == 0) ? OrderStatus::Rejected : OrderStatus::Cancelled;
+            r.cum_qty    = taken;
+            r.leaves_qty = 0;
+            out.push_back(r);
+        }
+        return;
+    }
+    if (taken >= req.qty) return;
+
+    // Rest the remainder. We join the back of the displayed queue.
+    Resting rs;
+    rs.req          = req;
+    rs.filled       = taken;
+    rs.level_qty    = static_cast<double>(book.visible_qty_at_price(req.side, req.price));
+    rs.queue_ahead  = rs.level_qty;
+    rs.traded_since = 0.0;
+    resting_[req.order_id] = rs;
+
+    ExecutionReport r = base_report(req, ts);
+    r.status     = OrderStatus::New;
+    r.cum_qty    = taken;
+    r.leaves_qty = req.qty - taken;
+    out.push_back(r);
+}
+
+void ExchangeSim::on_cancel(OrderId id, Timestamp ts, std::vector<ExecutionReport>& out) {
+    auto it = resting_.find(id);
+    ExecutionReport r;
+    r.order_id = id;
+    r.ts       = ts;
+    if (it == resting_.end()) {
+        r.status = OrderStatus::CancelRejected;
+        out.push_back(r);
+        return;
+    }
+    r = base_report(it->second.req, ts);
+    r.status     = OrderStatus::Cancelled;
+    r.cum_qty    = it->second.filled;
+    r.leaves_qty = 0;
+    out.push_back(r);
+    resting_.erase(it);
+}
+
+void ExchangeSim::fill_passive(Resting& rs, Qty qty, Price px, Timestamp ts, Portfolio& pf,
+                               std::vector<ExecutionReport>& out, FillCause cause, double queue_ahead) {
+    qty = std::min(qty, rs.leaves());
+    if (qty <= 0) return;
+    rs.filled += qty;
+    double fee = inst_.notional(px, qty) * cfg_.fees.maker;
+    pf.on_fill(rs.req.side, px, qty, fee);
+    ExecutionReport r = base_report(rs.req, ts);
+    r.fill_price = px;
+    r.fill_qty   = qty;
+    r.cum_qty    = rs.filled;
+    r.leaves_qty = rs.leaves();
+    r.fee        = fee;
+    r.liquidity  = Liquidity::Maker;
+    r.status     = (r.leaves_qty == 0) ? OrderStatus::Filled : OrderStatus::PartiallyFilled;
+    r.cause       = cause;
+    r.queue_ahead = queue_ahead;
+    out.push_back(r);
+}
+
+void ExchangeSim::on_trade(const TradePrint& tr, Timestamp ts, Portfolio& pf,
+                           std::vector<ExecutionReport>& out) {
+    if (resting_.empty() || tr.qty <= 0) return;
+    // A buy aggressor lifts asks; a sell aggressor hits bids.
+    const Side passive = (tr.aggressor == Side::Bid) ? Side::Ask : Side::Bid;
+
+    scratch_ids_.clear();
+    for (auto& [id, rs] : resting_)
+        if (rs.req.side == passive) scratch_ids_.push_back(id);
+    if (scratch_ids_.empty()) return;
+    // Price priority among our own orders: best-priced first.
+    std::sort(scratch_ids_.begin(), scratch_ids_.end(), [&](OrderId a, OrderId b) {
+        const auto& ra = resting_[a].req;
+        const auto& rb = resting_[b].req;
+        if (ra.price != rb.price) return passive == Side::Bid ? ra.price > rb.price : ra.price < rb.price;
+        return a < b;
+    });
+
+    double remaining = static_cast<double>(tr.qty);  // aggressor size left to allocate to us
+    for (OrderId id : scratch_ids_) {
+        Resting& rs = resting_[id];
+        const bool through = (passive == Side::Bid) ? (tr.price < rs.req.price)
+                                                    : (tr.price > rs.req.price);
+        if (through) {
+            Qty f = std::min<Qty>(rs.leaves(), static_cast<Qty>(remaining));
+            if (f > 0) {
+                fill_passive(rs, f, rs.req.price, ts, pf, out, FillCause::TradeThrough, rs.queue_ahead);
+                remaining -= static_cast<double>(f);
+            }
+            // Level was swept: nobody is left ahead of whatever remains of us.
+            rs.queue_ahead = 0.0;
+        } else if (tr.price == rs.req.price) {
+            rs.traded_since += static_cast<double>(tr.qty);
+            const double ahead_before = rs.queue_ahead;
+            rs.queue_ahead  -= static_cast<double>(tr.qty);
+            if (rs.queue_ahead < 0.0) {
+                double excess = -rs.queue_ahead;
+                rs.queue_ahead = 0.0;
+                Qty f = static_cast<Qty>(std::floor(std::min(excess, remaining) + 1e-9));
+                f = std::min(f, rs.leaves());
+                if (f > 0) {
+                    fill_passive(rs, f, rs.req.price, ts, pf, out, FillCause::TradeAtPrice, ahead_before);
+                    remaining -= static_cast<double>(f);
+                }
+            }
+        }
+        if (remaining <= 0.0) break;
+    }
+    for (OrderId id : scratch_ids_) {
+        auto it = resting_.find(id);
+        if (it != resting_.end() && it->second.leaves() <= 0) resting_.erase(it);
+    }
+}
+
+void ExchangeSim::on_depth(const MarketEvent& ev, const OrderBook& book, Portfolio& pf,
+                           std::vector<ExecutionReport>& out) {
+    if (resting_.empty()) return;
+
+    const bool snapshot = (ev.type == EventType::Snapshot);
+    if (!snapshot) {
+        scratch_bids_.clear();
+        scratch_asks_.clear();
+        for (const auto& l : ev.bids) scratch_bids_[l.price] = l.qty;
+        for (const auto& l : ev.asks) scratch_asks_[l.price] = l.qty;
     }
 
-    // Defer: order arrives and is matched against a later book state.
-    pending_market_orders_.push_back({order, order.ts + latency_.total_us()});
-    return {};
-}
+    auto bb = book.best_bid();
+    auto ba = book.best_ask();
+    scratch_ids_.clear();
 
-void ExchangeSim::register_passive_order_now(const SimOrder& order, const OrderBook& book) {
-    PassiveOrderState state;
-    state.order              = order;
-    state.qty_ahead          = book.visible_qty_at_price(order.side, order.price);
-    state.level_qty_at_entry = state.qty_ahead;
-    passive_orders_[order.order_id] = state;
-}
-
-OrderId ExchangeSim::submit_limit_order(const SimOrder& order, const OrderBook& book,
-                                        const Portfolio& portfolio) {
-    if (would_self_cross(order)) return 0;
-    if (breaches_risk_limit(order.side, order.qty, portfolio)) return 0;
-
-    if (latency_.total_us() == 0) {
-        register_passive_order_now(order, book);
-    } else {
-        pending_limit_orders_.push_back({order, order.ts + latency_.total_us()});
-    }
-    return order.order_id;
-}
-
-void ExchangeSim::cancel_order(OrderId order_id) {
-    passive_orders_.erase(order_id);
-    pending_limit_orders_.erase(
-        std::remove_if(pending_limit_orders_.begin(), pending_limit_orders_.end(),
-            [&](const PendingLimitOrder& p) { return p.order.order_id == order_id; }),
-        pending_limit_orders_.end());
-}
-
-std::vector<ExecutionReport> ExchangeSim::on_market_event(
-    const BinanceDepthEvent& event,
-    const OrderBook&         book,
-    Portfolio&               portfolio) {
-
-    std::vector<ExecutionReport> reports;
-    advance_passive_orders(event, book, portfolio, reports);
-    process_pending_orders(event, book, portfolio, reports);
-    return reports;
-}
-
-void ExchangeSim::process_pending_orders(
-    const BinanceDepthEvent& event,
-    const OrderBook&         book,
-    Portfolio&               portfolio,
-    std::vector<ExecutionReport>& reports) {
-
-    for (auto it = pending_market_orders_.begin(); it != pending_market_orders_.end();) {
-        if (it->arrival_ts <= event.event_time) {
-            ExecutionReport rep = execute_market_order_now(it->order, book, portfolio);
-            reports.push_back(rep);
-            if (rep.status != OrderStatus::Rejected) pending_fills_.push_back(rep);
-            it = pending_market_orders_.erase(it);
+    for (auto& [id, rs] : resting_) {
+        const auto& req = rs.req;
+        bool touched = snapshot;
+        double new_qty = 0.0;
+        if (snapshot) {
+            new_qty = static_cast<double>(book.visible_qty_at_price(req.side, req.price));
         } else {
-            ++it;
+            auto& m  = (req.side == Side::Bid) ? scratch_bids_ : scratch_asks_;
+            auto  it = m.find(req.price);
+            if (it != m.end()) {
+                touched = true;
+                new_qty = static_cast<double>(it->second);
+            }
+        }
+
+        if (touched) {
+            const double prev     = rs.level_qty;
+            const double net_chg  = prev - new_qty - rs.traded_since;  // >0: cancels
+            const double level_now = std::max(prev - rs.traded_since, 0.0);
+            rs.traded_since = 0.0;
+            if (net_chg > 0.0) {
+                const double front = rs.queue_ahead;
+                const double back  = std::max(level_now - front, 0.0);
+                const double p     = cfg_.queue.prob_behind(front, back);
+                double est = front - (1.0 - p) * net_chg + std::min(back - p * net_chg, 0.0);
+                rs.queue_ahead = std::max(est, 0.0);
+            }
+            rs.queue_ahead = std::min(rs.queue_ahead, new_qty);
+            rs.level_qty   = new_qty;
+        }
+
+        // The opposite side trading through our price is unambiguous fill
+        // evidence even with no trade print (e.g. depth-only data).
+        if (cfg_.fill_on_cross) {
+            bool crossed = (req.side == Side::Bid) ? (ba && ba->price <= req.price)
+                                                   : (bb && bb->price >= req.price);
+            if (crossed) {
+                fill_passive(rs, rs.leaves(), req.price, ev.ts, pf, out, FillCause::BookCross, rs.queue_ahead);
+                scratch_ids_.push_back(id);
+            }
         }
     }
-
-    for (auto it = pending_limit_orders_.begin(); it != pending_limit_orders_.end();) {
-        if (it->arrival_ts <= event.event_time) {
-            register_passive_order_now(it->order, book);
-            it = pending_limit_orders_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-void ExchangeSim::advance_passive_orders(
-    const BinanceDepthEvent& event,
-    const OrderBook&         book,
-    Portfolio&               portfolio,
-    std::vector<ExecutionReport>& reports) {
-    (void)book;
-
-    // Build a map of price-level quantity changes from the event
-    // delta = new_qty - old_qty; if negative, queue at that level shrank
-    // We approximate: if visible qty at a bid/ask level decreased, orders ahead shrink
-    std::unordered_map<Price, Qty> bid_new_qty, ask_new_qty;
-    for (const auto& lvl : event.bid_updates) bid_new_qty[lvl.price] = lvl.qty;
-    for (const auto& lvl : event.ask_updates) ask_new_qty[lvl.price] = lvl.qty;
-
-    std::vector<OrderId> to_erase;
-
-    for (auto& [oid, state] : passive_orders_) {
-        const auto& ord = state.order;
-        auto& qty_ahead = state.qty_ahead;
-
-        // Look up this price level in the event updates. A passive order can
-        // only fill or be cancelled because of activity at its OWN price
-        // level — if this event didn't touch that level, skip it entirely.
-        // (Previously the qty_ahead<=0 fill check below ran unconditionally
-        // for every resting order on every event; a freshly-placed order at
-        // a price with no prior displayed depth starts with qty_ahead == 0,
-        // so it would fill on the very next *unrelated* market event anywhere
-        // in the book. In practice this made MarketMaker's bid and ask both
-        // fill simultaneously on almost every quote cycle — a risk-free
-        // spread capture that never actually held inventory. Gating on
-        // `it != side_map.end()` requires genuine activity at the order's
-        // exact price before it can fill, which is the minimum realistic bar
-        // for an L2-only approximation.)
-        auto& side_map = (ord.side == Side::Bid) ? bid_new_qty : ask_new_qty;
-        auto it = side_map.find(ord.price);
-        if (it == side_map.end()) continue;
-
-        Qty new_qty = it->second;
-        if (new_qty == 0) {
-            // Level deleted — cancel passive order (level gone)
-            ExecutionReport rep{};
-            rep.order_id      = oid;
-            rep.ts            = event.event_time;
-            rep.side          = ord.side;
-            rep.order_type    = ord.type;
-            rep.status        = OrderStatus::Cancelled;
-            rep.fill_price    = 0;
-            rep.fill_qty      = 0;
-            rep.remaining_qty = ord.qty;
-            rep.fee_paid      = 0.0;
-            rep.strategy_name = ord.strategy_name;
-            reports.push_back(rep);
-            pending_fills_.push_back(rep);
-            to_erase.push_back(oid);
-            continue;
-        }
-
-        // Level qty changed: compute decrease and subtract from qty_ahead
-        // Approximate: if visible qty at our level shrank, our queue position shrank too
-        if (new_qty < qty_ahead) {
-            qty_ahead = new_qty;  // snap to new visible qty
-        }
-
-        // Check if we should fill: qty_ahead <= 0
-        if (qty_ahead <= 0) {
-            Qty fill_qty = ord.qty;
-            double notional = (static_cast<double>(ord.price) / TICK_MULTIPLIER)
-                            * (static_cast<double>(fill_qty)  / TICK_MULTIPLIER);
-            double fee      = notional * maker_fee_;  // USD
-
-            portfolio.on_fill(ord.side, ord.price, fill_qty, fee);
-
-            ExecutionReport rep{};
-            rep.order_id      = oid;
-            rep.ts            = event.event_time;
-            rep.side          = ord.side;
-            rep.order_type    = ord.type;
-            rep.status        = OrderStatus::Filled;
-            rep.fill_price    = ord.price;
-            rep.fill_qty      = fill_qty;
-            rep.remaining_qty = 0;
-            rep.fee_paid      = fee;
-            rep.strategy_name = ord.strategy_name;
-            reports.push_back(rep);
-            pending_fills_.push_back(rep);
-            to_erase.push_back(oid);
-        }
-    }
-
-    for (auto oid : to_erase) passive_orders_.erase(oid);
-}
-
-size_t ExchangeSim::active_order_count() const { return passive_orders_.size(); }
-
-std::vector<ExecutionReport> ExchangeSim::drain_fills() {
-    std::vector<ExecutionReport> out;
-    std::swap(out, pending_fills_);
-    return out;
+    for (OrderId id : scratch_ids_) resting_.erase(id);
 }
