@@ -1,0 +1,71 @@
+{
+  "avg_queue_ahead_at_fill_lots": 2031.2333333333333,
+  "cancel_rejects": 0,
+  "cancels_sent": 37,
+  "edge": 0.0012999999999999997,
+  "end_ts": 1791608738327000,
+  "fees": 0.4958811000000002,
+  "final_position": 0.01,
+  "flatten_cost": 0.4549328250000001,
+  "gross_pnl": -0.3601999999995896,
+  "hours": 0.1667225,
+  "latency": {
+    "engine_to_trade": {
+      "max_ns": 23166.0,
+      "n": 103,
+      "p50_ns": 10917.0,
+      "p90_ns": 14333.0,
+      "p999_ns": 22375.0,
+      "p99_ns": 19333.0
+    },
+    "recv_to_engine": {
+      "max_ns": 9974417.0,
+      "n": 16281,
+      "p50_ns": 2666.0,
+      "p90_ns": 6125.0,
+      "p999_ns": 1193708.0,
+      "p99_ns": 23458.0
+    },
+    "tick_to_trade": {
+      "max_ns": 32125.0,
+      "n": 103,
+      "p50_ns": 16417.0,
+      "p90_ns": 24583.0,
+      "p999_ns": 31584.0,
+      "p99_ns": 31500.0
+    }
+  },
+  "local_refusals": 0,
+  "maker_fills": 30,
+  "maker_volume": 0.03000000000000002,
+  "market_events": 16308,
+  "markout": {
+    "100ms": -0.0651,
+    "1s": -0.07830000000000001,
+    "300s": -0.3009999999999999,
+    "30s": -0.11830000000000002,
+    "5s": -0.081,
+    "60s": -0.0752
+  },
+  "max_abs_position": 0.01,
+  "max_drawdown": 0.8560810999995898,
+  "mean_abs_position": 0.008253333333333269,
+  "mid_end": 82624.15000000001,
+  "mid_start": 82666.75,
+  "net_bps_of_notional": -3.452767609007842,
+  "net_pnl": -0.8560810999995898,
+  "net_pnl_flat": -1.3110139249995898,
+  "notional": 2479.405500000001,
+  "orders_sent": 68,
+  "realized_pnl": -0.1802179999998625,
+  "rejects": 0,
+  "start_ts": 1791608138126000,
+  "strategy": "NaiveMarketMaker",
+  "symbol": "BTCUSDT",
+  "taker_fills": 0,
+  "taker_volume": 0.0,
+  "trade_events": 916,
+  "uptime_ask": 1.0,
+  "uptime_bid": 0.49166666666666664,
+  "wall_ms": 599999.776
+}
