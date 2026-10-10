@@ -2,6 +2,7 @@
 #include "../core/types.hpp"
 #include "../core/side.hpp"
 #include "../core/level.hpp"
+#include "l3_record.hpp"
 #include <vector>
 
 // Venue-agnostic market data event, timestamped in *exchange* (matching
@@ -24,4 +25,8 @@ struct MarketEvent {
     std::vector<Level> bids;
     std::vector<Level> asks;
     TradePrint         trade;
+    // Order-level sources also attach the raw L3 event, so an exact-queue
+    // exchange can track individual orders; L2-only consumers ignore it.
+    bool               has_l3 = false;
+    L3Record           l3{};
 };
