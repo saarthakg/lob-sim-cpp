@@ -116,20 +116,21 @@ def main():
     # Figure 1: gross bp (= break-even maker fee) per symbol/strategy vs fee tiers.
     piv = main_[(main_["fee"] == "vip0") & (main_["tag"] == "")].pivot_table(index="sym", columns="strat", values="gross_bps")
     piv = piv.reindex(columns=[c for c in ["naive", "glft", "ladder"] if c in piv.columns])
-    fig, ax = plt.subplots(figsize=(9, 4.2))
+    fig, ax = plt.subplots(figsize=(11, 4.2))
     xs = np.arange(len(piv.index))
     w = 0.8 / max(1, len(piv.columns))
     for i, c in enumerate(piv.columns):
         ax.bar(xs + i * w - 0.4 + w / 2, piv[c].values, width=w - 0.02, label=c, color=style.SERIES[i])
+    # net = gross − fee·notional, so breaking even needs gross ≥ the maker fee.
     for fee, ls in [("vip0", "--"), ("rebate", ":")]:
-        ax.axhline(-FEE_BP[fee], color=style.TEXT_2, linestyle=ls, linewidth=1,
-                   label=f"needed to break even at {FEE_LABEL[fee]}")
+        ax.axhline(FEE_BP[fee], color=style.TEXT_2, linestyle=ls, linewidth=1,
+                   label=f"break-even at {FEE_LABEL[fee]}")
     ax.axhline(0, color=style.TEXT, linewidth=0.6)
     ax.set_xticks(xs)
     ax.set_xticklabels(piv.index)
     ax.set_ylabel("gross PnL, bp of traded notional")
     ax.set_title("Out-of-sample gross edge before fees (VIP0-selected configs, test days)")
-    ax.legend(loc="lower left", ncol=2)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0))
     fig.tight_layout()
     fig.savefig(PLOTS / "study_gross_edge.png", dpi=140)
 
@@ -137,7 +138,10 @@ def main():
     lat = sens[sens["tag"].str.startswith("_lat")].copy()
     if len(lat):
         lat["latency_ms"] = lat["tag"].str.extract(r"_lat(\d+)").astype(float) / 1000
-        fig, ax = plt.subplots(figsize=(9, 4.2))
+        # The ladder doesn't put fees into its quotes, so its VIP0 and rebate
+        # selections behave identically before fees; keep one line for it.
+        lat = lat[(lat["strat"] == "glft") | (lat["fee"] == "rebate")]
+        fig, ax = plt.subplots(figsize=(11, 4.2))
         for i, ((sym, fee), g) in enumerate(lat.groupby(["sym", "fee"])):
             g = g.sort_values("latency_ms")
             ax.plot(g["latency_ms"].clip(lower=0.1), g["gross_bps"], marker="o", markersize=4,
@@ -147,7 +151,7 @@ def main():
         ax.set_xlabel("one-way latency on feed, entry and response (ms; 0 plotted at 0.1)")
         ax.set_ylabel("gross PnL, bp of notional")
         ax.set_title("Latency sensitivity of selected configurations (test days)")
-        ax.legend(loc="best")
+        ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0))
         fig.tight_layout()
         fig.savefig(PLOTS / "study_latency.png", dpi=140)
     print(f"\nwrote {STUDY / 'SUMMARY.md'} and plots in {PLOTS}")
