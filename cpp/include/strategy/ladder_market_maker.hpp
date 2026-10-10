@@ -43,7 +43,7 @@ public:
         double  inventory_skew  = 0.0;      // ticks of alpha per order-size unit of inventory
         int     max_spread_ticks = 1;       // only make markets when the book is this tight
         double  depletion_pull  = 0.0;      // 0 = off; e.g. 0.5 = pull after half the level traded
-        int64_t interval_us     = 100'000;
+        int64_t interval_us     = 100'000;   // 0 = requote on every book update
     };
 
     LadderMarketMaker() = default;

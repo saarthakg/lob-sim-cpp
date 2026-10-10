@@ -64,6 +64,8 @@ Latency (microseconds)
 
 Strategy
   --order-size Q                    base-asset units per order (default: 1 lot)
+  --quote-on-book                   naive/ladder/glft: requote on every book update
+                                    instead of a 100 ms timer
   --max-position Q                  base-asset units (default: 10 x order size)
   glft:      --gamma G --levels N --half-spread-mult M --skew-mult M
              --alpha-micro A --alpha-obi B --alpha-scale S --obi-band-bps W
@@ -100,7 +102,7 @@ struct Args {
 static Args parse_args(int argc, char** argv) {
     static const std::map<std::string, bool> is_flag = {
         {"--no-cross-fill", true}, {"--no-fee-in-quotes", true}, {"--calib-log", true},
-        {"--passive", true}, {"--quiet", true}, {"--no-book-metrics", true}, {"--synthetic-demo", true}, {"--help", true},
+        {"--passive", true}, {"--quiet", true}, {"--no-book-metrics", true}, {"--quote-on-book", true}, {"--synthetic-demo", true}, {"--help", true},
         {"-h", true}};
     Args a;
     for (int i = 1; i < argc; ++i) {
@@ -212,6 +214,7 @@ static std::unique_ptr<Strategy> make_strategy(const std::string& name, const Ar
         c.warmup_us        = static_cast<int64_t>(a.num("--warmup-s", 600) * 1e6);
         c.max_depth_ticks  = static_cast<int>(a.num("--max-depth-ticks", c.max_depth_ticks));
         c.depletion_pull   = a.num("--depletion-pull", 0.0);
+        c.quote_on_book    = a.has("--quote-on-book");
         if (a.has("--calib-log") && !out_dir.empty()) c.log_path = out_dir + "/calibration.csv";
         return std::make_unique<GlftMarketMaker>(c);
     }
@@ -227,6 +230,7 @@ static std::unique_ptr<Strategy> make_strategy(const std::string& name, const Ar
         c.inventory_skew = a.num("--inventory-skew", c.inventory_skew);
         c.max_spread_ticks = static_cast<int>(a.num("--max-spread-ticks", c.max_spread_ticks));
         c.depletion_pull = a.num("--depletion-pull", c.depletion_pull);
+        if (a.has("--quote-on-book")) c.interval_us = 0;
         return std::make_unique<LadderMarketMaker>(c);
     }
     if (name == "naive" || name == "mm") {
@@ -234,6 +238,7 @@ static std::unique_ptr<Strategy> make_strategy(const std::string& name, const Ar
         c.order_qty    = order_qty;
         c.max_position = max_pos;
         c.offset_ticks = static_cast<int>(a.num("--offset-ticks", 0));
+        if (a.has("--quote-on-book")) c.quote_interval_us = 0;
         return std::make_unique<NaiveMarketMaker>(c);
     }
     if (name == "imbalance") {

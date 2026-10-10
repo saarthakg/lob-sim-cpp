@@ -38,6 +38,11 @@ void GlftMarketMaker::on_trade(StrategyContext& ctx, const TradePrint& tr) {
     guard_.on_trade(ctx, tr);
 }
 
+void GlftMarketMaker::on_book(StrategyContext& ctx) {
+    guard_.on_book();
+    if (cfg_.quote_on_book && calibrated_ && start_ts_ != 0 && ctx.now() - start_ts_ >= cfg_.warmup_us) quote(ctx);
+}
+
 void GlftMarketMaker::on_timer(StrategyContext& ctx) {
     const OrderBook& book = ctx.book();
     if (book.empty()) return;
@@ -53,7 +58,7 @@ void GlftMarketMaker::on_timer(StrategyContext& ctx) {
         next_calib_ += cfg_.calib_interval_us;
         calibrate(ctx);
     }
-    if (calibrated_ && ctx.now() - start_ts_ >= cfg_.warmup_us) quote(ctx);
+    if (!cfg_.quote_on_book && calibrated_ && ctx.now() - start_ts_ >= cfg_.warmup_us) quote(ctx);
 }
 
 void GlftMarketMaker::calibrate(StrategyContext& ctx) {

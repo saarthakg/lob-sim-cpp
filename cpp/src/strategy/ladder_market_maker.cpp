@@ -41,8 +41,8 @@ void LadderMarketMaker::on_timer(StrategyContext& ctx) {
 }
 
 void LadderMarketMaker::on_book(StrategyContext& ctx) {
-    (void)ctx;
     guard_.on_book();
+    if (cfg_.interval_us == 0) on_timer(ctx);
 }
 
 void LadderMarketMaker::on_trade(StrategyContext& ctx, const TradePrint& tr) { guard_.on_trade(ctx, tr); }

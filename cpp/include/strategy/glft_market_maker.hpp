@@ -48,6 +48,7 @@ public:
         int64_t warmup_us      = 600'000'000;  // don't quote before the window has data
         int     max_depth_ticks = 50;      // λ(δ) fit range
         double  depletion_pull = 0.0;      // see DepletionGuard; 0 = off
+        bool    quote_on_book  = false;    // requote on every book update (timer still samples σ, λ)
         std::string log_path;              // optional calibration log CSV
     };
 
@@ -59,7 +60,7 @@ public:
     int64_t timer_interval_us() const override { return cfg_.quote_interval_us; }
     void on_start(StrategyContext& ctx) override;
     void on_trade(StrategyContext& ctx, const TradePrint& tr) override;
-    void on_book(StrategyContext& ctx) override { (void)ctx; guard_.on_book(); }
+    void on_book(StrategyContext& ctx) override;
     void on_timer(StrategyContext& ctx) override;
 
     double A() const { return A_; }
