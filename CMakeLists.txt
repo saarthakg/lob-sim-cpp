@@ -75,3 +75,6 @@ catch_discover_tests(lob_tests)
 # ── lob_bench executable ──────────────────────────────────────────────────────
 add_executable(lob_bench cpp/bench/bench_replay.cpp)
 target_link_libraries(lob_bench PRIVATE lob_core)
+
+add_executable(lob_bench_l3 cpp/bench/bench_l3.cpp)
+target_link_libraries(lob_bench_l3 PRIVATE lob_core)
