@@ -1,79 +1,82 @@
 #include "../../include/core/order_book.hpp"
-#include <stdexcept>
-#include <iterator>
+
+OrderBook::OrderBook(int log2_window) : bids_(true, log2_window), asks_(false, log2_window) {
+    qty_.reserve(1024);
+    free_.reserve(1024);
+}
 
 void OrderBook::clear() {
     bids_.clear();
     asks_.clear();
+    qty_.clear();
+    free_.clear();
     update_id_ = 0;
 }
 
 void OrderBook::load_snapshot(const BookSnapshot& snapshot) {
     clear();
-    for (const auto& lvl : snapshot.bids) {
-        if (lvl.qty > 0) bids_[lvl.price] = lvl.qty;
-    }
-    for (const auto& lvl : snapshot.asks) {
-        if (lvl.qty > 0) asks_[lvl.price] = lvl.qty;
-    }
+    for (const auto& lvl : snapshot.bids) if (lvl.qty > 0) apply_update(Side::Bid, lvl.price, lvl.qty);
+    for (const auto& lvl : snapshot.asks) if (lvl.qty > 0) apply_update(Side::Ask, lvl.price, lvl.qty);
     update_id_ = snapshot.last_update_id;
 }
 
 void OrderBook::apply_update(Side side, Price price, Qty qty) {
-    if (side == Side::Bid) {
-        if (qty == 0) {
-            bids_.erase(price);
-        } else {
-            bids_[price] = qty;
+    PriceLadder& lad = ladder(side);
+    const uint32_t slot = lad.find(price);
+    if (qty == 0) {
+        if (slot != PriceLadder::NIL) {
+            lad.erase(price);
+            free_.push_back(slot);
         }
-    } else {
-        if (qty == 0) {
-            asks_.erase(price);
-        } else {
-            asks_[price] = qty;
-        }
+        return;
     }
+    if (slot != PriceLadder::NIL) {
+        qty_[slot] = qty;
+        return;
+    }
+    uint32_t s;
+    if (!free_.empty()) {
+        s = free_.back();
+        free_.pop_back();
+        qty_[s] = qty;
+    } else {
+        s = static_cast<uint32_t>(qty_.size());
+        qty_.push_back(qty);
+    }
+    lad.insert(price, s);
 }
 
 std::optional<Level> OrderBook::best_bid() const {
     if (bids_.empty()) return std::nullopt;
-    auto it = bids_.begin();
-    return Level{it->first, it->second};
+    const Price p = bids_.best();
+    return Level{p, qty_[bids_.find(p)]};
 }
 
 std::optional<Level> OrderBook::best_ask() const {
     if (asks_.empty()) return std::nullopt;
-    auto it = asks_.begin();
-    return Level{it->first, it->second};
+    const Price p = asks_.best();
+    return Level{p, qty_[asks_.find(p)]};
 }
 
 double OrderBook::mid_price() const {
-    auto bid = best_bid();
-    auto ask = best_ask();
-    if (!bid || !ask) return 0.0;
-    return (static_cast<double>(bid->price) + static_cast<double>(ask->price)) / 2.0;
+    if (empty()) return 0.0;
+    return (static_cast<double>(bids_.best()) + static_cast<double>(asks_.best())) / 2.0;
 }
 
 double OrderBook::spread() const {
-    auto bid = best_bid();
-    auto ask = best_ask();
-    if (!bid || !ask) return 0.0;
-    return static_cast<double>(ask->price - bid->price);
+    if (empty()) return 0.0;
+    return static_cast<double>(asks_.best() - bids_.best());
 }
 
 double OrderBook::imbalance(int depth_levels) const {
-    int64_t bid_qty = 0, ask_qty = 0;
-    int count = 0;
-    for (auto it = bids_.begin(); it != bids_.end() && count < depth_levels; ++it, ++count) {
-        bid_qty += it->second;
-    }
-    count = 0;
-    for (auto it = asks_.begin(); it != asks_.end() && count < depth_levels; ++it, ++count) {
-        ask_qty += it->second;
-    }
-    double total = static_cast<double>(bid_qty + ask_qty);
+    int64_t bq = 0, aq = 0;
+    int n = 0;
+    for_each_level(Side::Bid, [&](Price, Qty q) { bq += q; return ++n < depth_levels; });
+    n = 0;
+    for_each_level(Side::Ask, [&](Price, Qty q) { aq += q; return ++n < depth_levels; });
+    const double total = static_cast<double>(bq + aq);
     if (total == 0.0) return 0.0;
-    return static_cast<double>(bid_qty - ask_qty) / total;
+    return static_cast<double>(bq - aq) / total;
 }
 
 double OrderBook::weighted_mid() const {
@@ -88,53 +91,45 @@ double OrderBook::weighted_mid() const {
 
 double OrderBook::depth_imbalance(Price ticks) const {
     if (empty()) return 0.0;
-    double mid = mid_price();
+    const double mid = mid_price();
+    const double band = static_cast<double>(ticks);
     double bq = 0.0, aq = 0.0;
-    for (const auto& [px, q] : bids_) {
-        if (mid - static_cast<double>(px) > static_cast<double>(ticks)) break;
+    for_each_level(Side::Bid, [&](Price p, Qty q) {
+        if (mid - static_cast<double>(p) > band) return false;
         bq += static_cast<double>(q);
-    }
-    for (const auto& [px, q] : asks_) {
-        if (static_cast<double>(px) - mid > static_cast<double>(ticks)) break;
+        return true;
+    });
+    for_each_level(Side::Ask, [&](Price p, Qty q) {
+        if (static_cast<double>(p) - mid > band) return false;
         aq += static_cast<double>(q);
-    }
+        return true;
+    });
     if (bq + aq <= 0.0) return 0.0;
     return (bq - aq) / (bq + aq);
 }
 
 bool OrderBook::crossed() const {
     if (empty()) return false;
-    return bids_.begin()->first >= asks_.begin()->first;
+    return bids_.best() >= asks_.best();
 }
 
 Qty OrderBook::visible_qty_at_price(Side side, Price px) const {
-    if (side == Side::Bid) {
-        auto it = bids_.find(px);
-        return (it != bids_.end()) ? it->second : 0;
-    } else {
-        auto it = asks_.find(px);
-        return (it != asks_.end()) ? it->second : 0;
-    }
+    const uint32_t s = ladder(side).find(px);
+    return s == PriceLadder::NIL ? 0 : qty_[s];
 }
 
 std::vector<Level> OrderBook::top_n_bids(int n) const {
-    std::vector<Level> result;
-    result.reserve(n);
-    int count = 0;
-    for (auto it = bids_.begin(); it != bids_.end() && count < n; ++it, ++count) {
-        result.push_back({it->first, it->second});
-    }
-    return result;
+    std::vector<Level> out;
+    out.reserve(static_cast<size_t>(n));
+    for_each_level(Side::Bid, [&](Price p, Qty q) { out.push_back({p, q}); return static_cast<int>(out.size()) < n; });
+    return out;
 }
 
 std::vector<Level> OrderBook::top_n_asks(int n) const {
-    std::vector<Level> result;
-    result.reserve(n);
-    int count = 0;
-    for (auto it = asks_.begin(); it != asks_.end() && count < n; ++it, ++count) {
-        result.push_back({it->first, it->second});
-    }
-    return result;
+    std::vector<Level> out;
+    out.reserve(static_cast<size_t>(n));
+    for_each_level(Side::Ask, [&](Price p, Qty q) { out.push_back({p, q}); return static_cast<int>(out.size()) < n; });
+    return out;
 }
 
 UpdateId OrderBook::update_id() const { return update_id_; }

@@ -45,6 +45,16 @@ public:
         }
     }
 
+    // Visit levels best-first while f(price, level_index) returns true.
+    template <typename F>
+    void for_each_best_while(F&& f) const {
+        if (empty()) return;
+        Price p = best_;
+        while (f(p, find(p))) {
+            if (!next_worse(p, p)) break;
+        }
+    }
+
     void clear();
     size_t recenters() const { return recenters_; }
 
