@@ -5,10 +5,14 @@ Parameters selected on 4 training days (2026-09-28 → 10-01), evaluated once on
 | symbol | strategy | maker fee | selected params | net $/day | % days > 0 | net bp | gross bp (= break-even maker fee) | edge at fill bp | markout 5s bp | fills/day | max DD $ |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | ADAUSDT | glft | rebate (−0.5 bp) | alpha-scale=1 levels=3 half-spread-mult=2 depletion-pull=0.3 | -36.76 | 0.00 | -1.15 | -1.65 | 2.01 | -1.96 | 2,869.25 | 102.81 |
+| ADAUSDT | glft (ext grid) | rebate (−0.5 bp) | alpha-scale=0 levels=1 half-spread-mult=8 depletion-pull=0.3 | 8.60 | 25.00 | 15.78 | 15.28 | 9.29 | -4.24 | 138.00 | 61.12 |
 | ADAUSDT | ladder | rebate (−0.5 bp) | alpha-scale=2 pull-threshold=0.05 levels=2 depletion-pull=0.3 inventory-skew=0 | -124.66 | 0.00 | -2.51 | -3.01 | 0.55 | -1.92 | 3,623.50 | 261.54 |
+| ADAUSDT | ladder (ext grid) | rebate (−0.5 bp) | alpha-scale=5 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0 | -90.19 | 25.00 | -1.62 | -2.12 | 1.34 | -1.93 | 4,082.25 | 219.18 |
 | ADAUSDT | naive | rebate (−0.5 bp) | default | -551.72 | 0.00 | -1.27 | -1.77 | -0.54 | -1.80 | 31,435.62 | 966.24 |
 | ADAUSDT | glft | VIP0 (+2.0 bp) | alpha-scale=1 levels=3 half-spread-mult=2 depletion-pull=0 | -47.06 | 0.00 | -3.85 | -1.85 | 3.97 | -2.67 | 1,503.50 | 114.07 |
+| ADAUSDT | glft (ext grid) | VIP0 (+2.0 bp) | alpha-scale=1 levels=3 half-spread-mult=5 depletion-pull=0.3 | 3.92 | 25.00 | 3.15 | 5.15 | 9.32 | -3.27 | 286.25 | 53.56 |
 | ADAUSDT | ladder | VIP0 (+2.0 bp) | alpha-scale=2 pull-threshold=0.05 levels=2 depletion-pull=0.3 inventory-skew=0 | -248.65 | 0.00 | -5.01 | -3.01 | 0.55 | -1.92 | 3,623.50 | 378.15 |
+| ADAUSDT | ladder (ext grid) | VIP0 (+2.0 bp) | alpha-scale=5 pull-threshold=0.05 levels=2 depletion-pull=0.3 inventory-skew=0 | -234.69 | 0.00 | -4.98 | -2.98 | 0.57 | -1.96 | 3,461.25 | 359.32 |
 | ADAUSDT | naive | VIP0 (+2.0 bp) | default | -1,638.41 | 0.00 | -3.77 | -1.77 | -0.54 | -1.80 | 31,435.62 | 2,598.15 |
 | ADAUSDT | glft | 0 bp | alpha-scale=1 levels=1 half-spread-mult=2 depletion-pull=0.3 | -42.33 | 0.00 | -2.36 | -2.36 | 1.44 | -2.35 | 1,770.25 | 105.58 |
 | ADAUSDT | ladder | 0 bp | alpha-scale=2 pull-threshold=0.05 levels=2 depletion-pull=0.3 inventory-skew=0 | -149.46 | 0.00 | -3.01 | -3.01 | 0.55 | -1.92 | 3,623.50 | 284.86 |
@@ -35,11 +39,14 @@ Parameters selected on 4 training days (2026-09-28 → 10-01), evaluated once on
 | BTCUSDT | glft | 0 bp | alpha-scale=1 levels=1 half-spread-mult=2 depletion-pull=0.3 | -96.60 | 0.00 | -0.73 | -0.73 | 0.59 | -0.73 | 5,355.00 | 124.50 |
 | BTCUSDT | naive | 0 bp | default | -3,575.56 | 0.00 | -0.85 | -0.85 | -0.20 | -0.83 | 148,914.25 | 5,900.39 |
 | XLMUSDT | glft | rebate (−0.5 bp) | alpha-scale=1 levels=3 half-spread-mult=2 depletion-pull=0.3 | 1.53 | 50.00 | 0.18 | -0.32 | 2.95 | -0.50 | 616.75 | 36.23 |
+| XLMUSDT | glft (ext grid) | rebate (−0.5 bp) | alpha-scale=1 levels=3 half-spread-mult=2 depletion-pull=0.3 | 1.53 | 50.00 | 0.18 | -0.32 | 2.95 | -0.50 | 616.75 | 36.23 |
 | XLMUSDT | ladder | rebate (−0.5 bp) | alpha-scale=1 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0 | -1.10 | 50.00 | -0.07 | -0.57 | 2.01 | -0.36 | 1,016.00 | 64.11 |
+| XLMUSDT | ladder (ext grid) | rebate (−0.5 bp) | alpha-scale=5 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0 | -3.57 | 50.00 | -0.27 | -0.77 | 2.35 | -0.34 | 872.50 | 84.45 |
 | XLMUSDT | naive | rebate (−0.5 bp) | default | -355.53 | 0.00 | -1.00 | -1.50 | -0.72 | -1.65 | 29,829.62 | 973.88 |
 | XLMUSDT | glft | VIP0 (+2.0 bp) | alpha-scale=0 levels=3 half-spread-mult=2 depletion-pull=0.3 | -15.57 | 25.00 | -4.92 | -2.92 | 5.12 | -0.74 | 263.00 | 68.49 |
 | XLMUSDT | glft (ext grid) | VIP0 (+2.0 bp) | alpha-scale=0 levels=3 half-spread-mult=8 depletion-pull=0.3 | 8.65 | 50.00 | 99.65 | 101.65 | 17.28 | -16.70 | 9.00 | 9.60 |
 | XLMUSDT | ladder | VIP0 (+2.0 bp) | alpha-scale=2 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0 | -38.30 | 25.00 | -2.73 | -0.73 | 2.19 | -0.31 | 919.25 | 104.01 |
+| XLMUSDT | ladder (ext grid) | VIP0 (+2.0 bp) | alpha-scale=5 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0 | -36.48 | 25.00 | -2.77 | -0.77 | 2.35 | -0.34 | 872.50 | 117.58 |
 | XLMUSDT | naive | VIP0 (+2.0 bp) | default | -1,245.13 | 0.00 | -3.50 | -1.50 | -0.72 | -1.65 | 29,829.62 | 2,866.43 |
 | XLMUSDT | glft | 0 bp | alpha-scale=0 levels=3 half-spread-mult=2 depletion-pull=0.3 | -14.58 | 25.00 | -1.74 | -1.74 | 2.63 | -0.88 | 711.50 | 63.06 |
 | XLMUSDT | ladder | 0 bp | alpha-scale=1 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0 | -8.81 | 50.00 | -0.57 | -0.57 | 2.01 | -0.36 | 1,016.00 | 67.10 |
