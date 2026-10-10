@@ -81,8 +81,8 @@ def main():
     ap.add_argument("--conflate-ms", type=float, default=100)
     ap.add_argument("--every-s", type=float, default=5)
     ap.add_argument("--horizon-s", type=float, default=300)
-    ap.add_argument("--tick", type=float, default=0.01)
-    ap.add_argument("--lot", type=float, default=1e-8)
+    ap.add_argument("--tick", type=float, default=None, help="default: finest decimal in the snapshot prices")
+    ap.add_argument("--lot", type=float, default=None, help="default: finest decimal in the snapshot amounts")
     a = ap.parse_args()
 
     cap = Path(a.capture)
@@ -91,8 +91,20 @@ def main():
     W = int(a.conflate_ms * 1000)
     H = int(a.horizon_s * 1e6)
     EVERY = int(a.every_s * 1e6)
-    q = Decimal(str(a.tick))
-    lotq = Decimal(str(a.lot))
+    if a.tick is None or a.lot is None:
+        # Tick/lot from the decimals the venue prints (Bitstamp: BTC 2/8, XRP 5/8).
+        # A wrong (too coarse) tick silently merges distinct price levels.
+        with open(cap) as f0:
+            snap0 = json.loads(f0.readline())["snapshot"]
+        rows0 = snap0["bids"] + snap0["asks"]
+        dec = lambda x: len(x.split(".")[1].rstrip("0")) if "." in x else 0
+        if a.tick is None:
+            a.tick = 10.0 ** -max(dec(r[0]) for r in rows0)
+        if a.lot is None:
+            a.lot = 10.0 ** -max(dec(r[1]) for r in rows0)
+    q = Decimal(str(a.tick)).normalize()
+    lotq = Decimal(str(a.lot)).normalize()
+    print(f"tick {a.tick:g}, lot {a.lot:g}")
 
     def px_str(p: Decimal) -> str:
         return str(p.quantize(q))
@@ -138,6 +150,7 @@ def main():
             through = (tr_px < px) if s == 0 else (tr_px > px)
             if through or (tr_px == px and maker is not None and maker not in p["ahead"]):
                 p["fill_ts"] = ts
+                p["cause"] = "trade_through" if through else "trade_at_price"
         elif kind == "cross":
             # Only on a settled, uncrossed book: Bitstamp publishes an incoming
             # taker limit order as order_created *before* it matches, so the raw
@@ -147,6 +160,7 @@ def main():
                 return
             if (s == 0 and ba <= px) or (s == 1 and bb >= px):
                 p["fill_ts"] = ts
+                p["cause"] = "book_cross"
 
     active = []
     with open(cap) as f:
@@ -213,7 +227,7 @@ def main():
         censored = p["fill_ts"] is None and p["ts"] + H > end_ts
         rows.append({"probe": i, "ts": p["ts"], "side": "B" if p["side"] == 0 else "A",
                      "price": float(p["price"]), "ahead_qty": float(p["ahead_qty"]),
-                     "true_fill_ts": p["fill_ts"], "censored": censored})
+                     "true_fill_ts": p["fill_ts"], "true_cause": p.get("cause", ""), "censored": censored})
     truth = pd.DataFrame(rows)
     truth.to_csv(f"{stem}.truth.csv", index=False)
     for sc in ("B", "A"):
