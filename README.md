@@ -8,7 +8,7 @@ itself. It runs entirely on **free public data**.
 
 | | |
 |---|---|
-| **Speed** | Order-level (L3) book at **50M msgs/s, 18 ns p50 / 46 ns p99 per operation**, 5× a `std::map`/`std::list` book. A real Bitstamp feed replays at 21M records/s. The backtest loop with a strategy runs at 1.7–2.2M events/s; a full day of BTCUSDT replays in about 2.5 s straight from compressed exchange archives. |
+| **Speed** | Order-level (L3) book at **50M msgs/s, 18 ns p50 / 46 ns p99 per operation**, 5× a `std::map`/`std::list` book. **Live tick-to-trade of 8.2 µs p50 / 22 µs p99** on Bybit's real-time feed (WebSocket thread → lock-free ring → engine). A full day of BTCUSDT replays in about 2.5 s straight from compressed exchange archives. |
 | **Fidelity** | On order-level data, our simulated orders sit in the **real FIFO queue**. Against independent L3 ground truth the exact-queue exchange matches real fills with 0.995 accuracy and 1.000 precision. On L2-only data, a queue model is used instead; it is calibrated against the same ground truth (fill rates within 4%). Feed, order-entry and response latency are modelled separately, so stale quotes really do get picked off. |
 | **Rigour** | Walk-forward parameter selection; 16 out-of-sample days; sensitivity sweeps over latency, queue model and fill rule; and a **pre-registered** confirmation test on 30 untouched days. |
 
@@ -43,6 +43,7 @@ itself. It runs entirely on **free public data**.
 
 - [Quickstart](#quickstart)
 - [Order-level (L3) engine](#order-level-l3-engine)
+- [Live paper-trading runtime](#live-paper-trading-runtime)
 - [How the simulator works](#how-the-simulator-works)
 - [Strategies](#strategies)
 - [Research workflow](#research-workflow)
@@ -135,6 +136,51 @@ before the real maker. Scored against the independent L3 ground truth
 
 Every strategy runs unchanged on both data paths, and `--exchange-model l2`
 scores the queue model on the same L3 market for a direct comparison.
+
+---
+
+## Live paper-trading runtime
+
+`lob_sim --live bybit --symbol BTCUSDT --strategy <s> --quote-on-book` runs
+any strategy against Bybit's **real-time** public feed, with orders matched by
+the simulated exchange. It needs no account and no API keys, and it uses the
+same `Backtester`, strategies and exchange as a backtest; only the
+`EventSource` changes.
+
+```
+ WebSocket thread                                    engine thread
+ frame ─▶ stamp recv time ─▶ fixed-point parse ─▶ SpscRing ─▶ exchange sim ─▶ strategy ─▶ order
+                                                 lock-free       ↑ recv→engine    ↑ engine→trade
+                                                 SPSC ring       └──────── tick→trade ────────┘
+```
+
+| Piece | Design |
+|---|---|
+| Hand-off | Lock-free SPSC ring: cache-line-separated head and tail, each side caching the other's index, acquire/release only. ThreadSanitizer-clean under a 5M-message two-thread test. |
+| Parsing | The same allocation-light fixed-point parser as the historical archive (the archive stores the WebSocket messages verbatim). |
+| Flow control | Backpressure, never drops, since a lost delta corrupts the book. Reconnects resubscribe and arrive as a fresh snapshot. |
+| Measurement | Every frame is stamped on arrival. Receive→engine, engine→trade and tick→trade are recorded for every order or cancel sent *in reaction to* an event, with a 1 s start-up warm-up excluded. |
+
+**10 minutes live, BTCUSDT** (`orderbook.50` + `publicTrade`, laptop, no core
+pinning; 20k events, zero ring overruns):
+
+| Stage | p50 | p90 | p99 | p99.9 |
+|---|---|---|---|---|
+| Parse (WebSocket thread) | 1.6 µs | — | 6.4 µs | — |
+| Receive → engine (through the ring) | 2.6 µs | 6.1 µs | 37.5 µs | 818 µs |
+| Engine → order (exchange sim + strategy) | 3.2 µs | 6.5 µs | 12.9 µs | 14.1 µs |
+| **Tick → trade** (frame received → order sent) | **8.2 µs** | **14.8 µs** | **22.2 µs** | **25.4 µs** |
+
+**Profiling.** `--measure-latency` replays an archive while timing the same
+engine path, so it can be profiled reproducibly. The profile showed the
+`std::map` L2 book plus a per-event hash map dominating. Rebuilding the L2
+book on the bitmap price ladder cut engine compute on a full BTCUSDT day from
+**25.7 µs to 3.1 µs at p50** and from **103 µs to 8.9 µs at p99**, and live
+tick-to-trade from 16.4 µs to 8.2 µs, with backtest results bit-identical.
+
+The remaining p99.9 tail on receive→engine is OS scheduling on a laptop.
+Core pinning and a busy-polling socket would be the next steps on a
+dedicated host.
 
 ---
 
