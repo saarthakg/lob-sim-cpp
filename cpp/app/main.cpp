@@ -1,4 +1,6 @@
+#include "../include/core/l3_book.hpp"
 #include "../include/core/order_book.hpp"
+#include "../include/marketdata/l3_format.hpp"
 #include "../include/marketdata/event_source.hpp"
 #include "../include/marketdata/parser.hpp"
 #include "../include/sim/backtester.hpp"
@@ -35,6 +37,12 @@ Modes
         flow, and the break-even arithmetic for passive quoting at given fees.
   --live-capture <SYMBOL> --output <csv> [--exchange bybit|binance] [--duration-minutes N]
   --load-snapshot <binance_rest_snapshot.json>
+  --convert-bitstamp-l3 <capture.l3.jsonl> --output <file.l3bin>
+        Convert an order-level capture (python/data/capture_bitstamp_l3.py)
+        to the binary L3 replay format.
+  --replay-l3 <file.l3bin>
+        Replay an L3 file through the order-level book: throughput and
+        consistency checks.
 
 Instrument
   --tick-size X --lot-size Y        override auto-detection (from the first snapshot)
@@ -341,6 +349,60 @@ static int run_replay(EventSource& src, const Args& a) {
     return 0;
 }
 
+// ── L3 (order-level) replay ──────────────────────────────────────────────────
+
+// Replays an L3 file through L3Book. Records are loaded first so the timed
+// loop measures the book, not disk I/O. Consistency counters flag feed gaps
+// or book-logic bugs: on a clean capture they should all be zero.
+static int run_replay_l3(const std::string& path) {
+    L3FileReader rd(path);
+    const L3FileHeader h = rd.header();
+    std::vector<L3Record> recs;
+    recs.reserve(h.count);
+    while (const L3Record* r = rd.next()) recs.push_back(*r);
+
+    L3Book book(18, 1 << 16);
+    size_t n[5] = {}, unknown_del = 0, unknown_mod = 0, dup_add = 0, crossed = 0, trade_maker_missing = 0;
+    Timer t;
+    t.start();
+    for (const L3Record& r : recs) {
+        switch (static_cast<L3Type>(r.type)) {
+            case L3Type::Add:
+                dup_add += !book.add(r.id, l3_side(r.side), r.price, r.qty);
+                break;
+            case L3Type::Delete:
+                unknown_del += !book.cancel(r.id);
+                break;
+            case L3Type::Modify:
+                unknown_mod += !book.modify(r.id, r.qty);
+                break;
+            case L3Type::Trade:
+                trade_maker_missing += !book.contains(r.id);
+                break;
+        }
+        ++n[r.type];
+        if (!book.empty(Side::Bid) && !book.empty(Side::Ask) &&
+            book.best_price(Side::Bid) >= book.best_price(Side::Ask))
+            ++crossed;
+    }
+    t.stop();
+    const double ms = t.elapsed_ms();
+    std::printf("L3 replay %s (%s, tick %g, lot %g)\n", path.c_str(), h.symbol, h.tick_size, h.lot_size);
+    std::printf("  records %zu: add %zu, delete %zu, modify %zu, trade %zu over %.1f min\n", recs.size(),
+                n[1], n[2], n[3], n[4], recs.empty() ? 0.0 : (recs.back().ts - recs.front().ts) / 6e7);
+    std::printf("  book: %.1f ms -> %.1f M records/s (%.1f ns/record, incl. a crossed-book check per record)\n",
+                ms, recs.size() / std::max(ms, 1e-9) / 1e3, ms * 1e6 / std::max<size_t>(recs.size(), 1));
+    std::printf("  final: %zu orders, %zu bid / %zu ask levels", book.order_count(),
+                book.level_count(Side::Bid), book.level_count(Side::Ask));
+    if (!book.empty(Side::Bid) && !book.empty(Side::Ask))
+        std::printf(", best %.*f / %.*f", 8, book.best_price(Side::Bid) * h.tick_size, 8,
+                    book.best_price(Side::Ask) * h.tick_size);
+    std::printf("\n  consistency: duplicate adds %zu, unknown deletes %zu, unknown modifies %zu, "
+                "crossed states %zu, trades with missing maker %zu\n",
+                dup_add, unknown_del, unknown_mod, crossed, trade_maker_missing);
+    return 0;
+}
+
 // ── misc modes ───────────────────────────────────────────────────────────────
 
 static void run_load_snapshot(const std::string& path) {
@@ -366,6 +428,13 @@ int main(int argc, char** argv) {
 
     try {
         if (a.has("--load-snapshot")) { run_load_snapshot(a.str("--load-snapshot")); return 0; }
+        if (a.has("--convert-bitstamp-l3")) {
+            if (!a.has("--output")) { std::cerr << "--convert-bitstamp-l3 requires --output <file.l3bin>\n"; return 1; }
+            uint64_t n = convert_bitstamp_l3(a.str("--convert-bitstamp-l3"), a.str("--output"));
+            std::cout << "wrote " << n << " records to " << a.str("--output") << "\n";
+            return 0;
+        }
+        if (a.has("--replay-l3")) return run_replay_l3(a.str("--replay-l3"));
         if (a.has("--live-capture")) {
             if (!a.has("--output")) { std::cerr << "--live-capture requires --output <csv>\n"; return 1; }
             run_live_capture(a.str("--live-capture"), static_cast<int>(a.num("--duration-minutes", 60)),
