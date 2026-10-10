@@ -1,0 +1,14 @@
+Connecting to Bybit BTCUSDT orderbook.50 + publicTrade for 10 min (paper trading)...
+Instrument BTCUSDT tick=0.1 lot=0.001 | strategy=NaiveMarketMaker order=0.001 max_pos=0.01 | fees maker=2.00bp taker=5.50bp | latency feed/entry/resp=0/0/0us | exchange=L2-model queue=power
+Output written to: data/processed/live_btc_10m_v2
+Replayed 20000 events (2089 trades) in 599999 ms (0.00M events/s)
+Orders 185, cancels 80, rejects 0, cancel-rejects 0, refused 0
+Fills  maker 104 (0.1040 units) / taker 0 (0.0000 units), notional $8598
+PnL    gross -0.34  fees -1.72  net -2.06  (net after flatten -2.52)  [-2.396 bps of notional]
+Edge   at fill +0.01 | markout 1s -0.42 5s -0.45 60s -0.52 300s -0.35
+Risk   max |pos| 0.0100, mean |pos| 0.0034, final pos 0.0100, max DD 2.06
+Latency (local monotonic clock)
+  recv->engine     n=19982    p50     2.6 us  p90     6.1 us  p99    37.5 us  p99.9    817.9 us  max   6354.8 us
+  tick->trade      n=263      p50     8.2 us  p90    14.8 us  p99    22.2 us  p99.9     25.4 us  max     25.6 us
+  engine->trade    n=263      p50     3.2 us  p90     6.5 us  p99    12.9 us  p99.9     14.1 us  max     14.1 us
+Feed: 18745 frames (17924 book, 2089 trades), parse p50 1.6 us p99 6.4 us, ring overruns 0, connections 1
