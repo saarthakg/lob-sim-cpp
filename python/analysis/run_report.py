@@ -68,7 +68,7 @@ def main():
     lines = [
         f"Fills: {s['maker_fills']:,} maker / {s['taker_fills']:,} taker   notional ${s['notional']:,.0f}",
         f"Gross PnL       {s['gross_pnl']:+,.2f}",
-        f"Fees            {-s['fees']:+,.2f}",
+        f"Fees            {-s['fees']:+,.2f}   (+ = net rebate received)",
         f"Net PnL         {s['net_pnl']:+,.2f}   ({s['net_bps_of_notional']:+.2f} bp of notional)",
         f"Net after flatten {s['net_pnl_flat']:+,.2f}",
         "",
