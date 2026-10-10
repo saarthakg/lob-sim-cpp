@@ -5,6 +5,7 @@
 #include "../../include/util/timer.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -14,6 +15,22 @@
 #include <stdexcept>
 
 namespace {
+
+int64_t mono_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+RunSummary::Pctl percentiles(std::vector<int64_t>& v) {
+    RunSummary::Pctl p;
+    p.n = v.size();
+    if (v.empty()) return p;
+    std::sort(v.begin(), v.end());
+    auto at = [&](double q) { return static_cast<double>(v[static_cast<size_t>(q * static_cast<double>(v.size() - 1))]); };
+    p.p50 = at(0.5); p.p90 = at(0.9); p.p99 = at(0.99); p.p999 = at(0.999);
+    p.max = static_cast<double>(v.back());
+    return p;
+}
 
 constexpr Timestamp T_INF = std::numeric_limits<Timestamp>::max();
 
@@ -109,6 +126,7 @@ OrderId Backtester::submit_limit(Side side, Price px, Qty qty, TimeInForce tif) 
     last_entry_arrival_ = arrive;
     to_exchange_.push_back({arrive, false, req});
     ++sum_.orders_sent;
+    note_submit();
     return req.order_id;
 }
 
@@ -134,6 +152,7 @@ OrderId Backtester::submit_market(Side side, Qty qty) {
     last_entry_arrival_ = arrive;
     to_exchange_.push_back({arrive, false, req});
     ++sum_.orders_sent;
+    note_submit();
     return req.order_id;
 }
 
@@ -147,6 +166,11 @@ void Backtester::cancel(OrderId id) {
     last_entry_arrival_ = arrive;
     to_exchange_.push_back({arrive, true, req});
     ++sum_.cancels_sent;
+    note_submit();
+}
+
+void Backtester::note_submit() {
+    if (react_ns_ > 0) lat_t2t_.push_back(mono_ns() - react_ns_);
 }
 
 // ── event plumbing ───────────────────────────────────────────────────────────
@@ -196,11 +220,14 @@ void Backtester::deliver_report(const ExecutionReport& rep) {
 void Backtester::deliver_local(const MarketEvent& ev, Timestamp local_t) {
     local_now_ = local_t;
     apply_to_book(local_book_, ev);
+    // Orders sent from these callbacks are reactions to `ev`: time them.
+    react_ns_ = ev.local_ns;
     if (ev.type == EventType::Trade) {
         strat_.on_trade(*this, ev.trade);
     } else if (!local_book_.empty() && !local_book_.crossed()) {
         strat_.on_book(*this);
     }
+    react_ns_ = 0;
 }
 
 void Backtester::drain_until(Timestamp t, bool inclusive) {
@@ -350,6 +377,7 @@ RunSummary Backtester::run() {
     bool first = true;
     const int64_t feed = cfg_.latency.feed_us;
     while (src_.next(ev)) {
+        if (ev.local_ns > 0) lat_recv_.push_back(mono_ns() - ev.local_ns);
         if (first) {
             first = false;
             sum_.start_ts = ev.ts;
@@ -413,6 +441,8 @@ void Backtester::finalize() {
         sum_.flatten_cost = std::fabs(sum_.final_position) * (half_spread + cfg_.exchange.fees.taker * mid * tick);
     }
     sum_.net_pnl_flat = sum_.net_pnl - sum_.flatten_cost;
+    sum_.recv_to_engine = percentiles(lat_recv_);
+    sum_.tick_to_trade  = percentiles(lat_t2t_);
     if (samples_ > 0) {
         sum_.mean_abs_position = abs_pos_acc_ / static_cast<double>(samples_);
         sum_.uptime_bid = static_cast<double>(bid_up_) / static_cast<double>(samples_);
@@ -480,5 +510,11 @@ void Backtester::write_summary_json(const RunSummary& s, const std::string& path
     j["uptime_bid"] = s.uptime_bid;
     j["uptime_ask"] = s.uptime_ask;
     j["net_bps_of_notional"] = s.notional > 0 ? s.net_pnl / s.notional * 1e4 : 0.0;
+    auto pj = [](const RunSummary::Pctl& p) {
+        return nlohmann::json{{"n", p.n}, {"p50_ns", p.p50}, {"p90_ns", p.p90}, {"p99_ns", p.p99},
+                              {"p999_ns", p.p999}, {"max_ns", p.max}};
+    };
+    if (s.recv_to_engine.n) j["latency"]["recv_to_engine"] = pj(s.recv_to_engine);
+    if (s.tick_to_trade.n)  j["latency"]["tick_to_trade"]  = pj(s.tick_to_trade);
     std::ofstream(path) << j.dump(2) << "\n";
 }

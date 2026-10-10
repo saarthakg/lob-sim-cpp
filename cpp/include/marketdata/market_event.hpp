@@ -29,4 +29,7 @@ struct MarketEvent {
     // exchange can track individual orders; L2-only consumers ignore it.
     bool               has_l3 = false;
     L3Record           l3{};
+    // Live feeds only: local monotonic clock (ns) when the message arrived,
+    // for measuring receive-to-engine and tick-to-trade latency. 0 in replay.
+    int64_t            local_ns = 0;
 };

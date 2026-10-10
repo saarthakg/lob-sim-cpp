@@ -97,6 +97,11 @@ struct RunSummary {
     double avg_queue_ahead_at_fill = 0.0;
     double mid_start = 0.0, mid_end = 0.0;            // quote ccy
     double uptime_bid = 0.0, uptime_ask = 0.0;        // fraction of samples with a resting quote
+
+    // Live feeds only (events carry local receive times). Percentiles in ns.
+    struct Pctl { size_t n = 0; double p50 = 0, p90 = 0, p99 = 0, p999 = 0, max = 0; };
+    Pctl recv_to_engine;   // message received -> event popped by the engine thread
+    Pctl tick_to_trade;    // message received -> order/cancel sent in reaction to it
 };
 
 class Backtester : private StrategyContext {
@@ -163,6 +168,9 @@ private:
     std::mt19937_64 rng_;
 
     std::vector<ExecutionReport> scratch_reports_;
+    int64_t react_ns_ = 0;                         // receive time of the event being reacted to
+    std::vector<int64_t> lat_recv_, lat_t2t_;
+    void note_submit();
     std::vector<FillRecord> fills_;
     std::array<size_t, N_MARKOUTS> markout_cursor_{};
     std::unordered_map<OrderId, double> queue_at_entry_;

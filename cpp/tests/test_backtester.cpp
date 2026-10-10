@@ -3,6 +3,7 @@
 #include "../include/sim/backtester.hpp"
 #include "../include/strategy/naive_market_maker.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <functional>
 
@@ -181,4 +182,33 @@ TEST_CASE("Naive market maker trades both sides on a two-way market", "[backtest
     REQUIRE(s.maker_fills > 10);
     REQUIRE(std::fabs(s.final_position) <= 0.031);
     REQUIRE(s.gross_pnl > 0);   // flat mid, alternating flow: pure spread capture
+}
+
+TEST_CASE("Live latency instrumentation counts reactions, not timer or replay events", "[backtest]") {
+    auto now_ns = [] {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    std::vector<MarketEvent> evs = {snapshot(0, 1000, 1001), snapshot(1000, 1000, 1001), snapshot(2000, 1000, 1001)};
+    for (auto& e : evs) e.local_ns = now_ns();   // as a live feed would stamp them
+    VectorSource src(inst(), evs);
+    Probe p;
+    p.on_book_fn = [](StrategyContext& c, int n) {
+        if (n == 0) c.submit_limit(Side::Bid, 999, 1);     // reaction to event 0
+        if (n == 1) for (auto& [id, o] : c.orders()) c.cancel(id);   // reaction to event 1
+    };
+    Backtester bt(src, p, quiet_cfg());
+    auto s = bt.run();
+    REQUIRE(s.recv_to_engine.n == 3);
+    REQUIRE(s.tick_to_trade.n == 2);
+    REQUIRE(s.tick_to_trade.p50 > 0);
+
+    // Replay data (local_ns == 0) records nothing.
+    VectorSource src2(inst(), {snapshot(0, 1000, 1001)});
+    Probe p2;
+    p2.on_book_fn = [](StrategyContext& c, int) { c.submit_limit(Side::Bid, 999, 1); };
+    Backtester bt2(src2, p2, quiet_cfg());
+    auto s2 = bt2.run();
+    REQUIRE(s2.recv_to_engine.n == 0);
+    REQUIRE(s2.tick_to_trade.n == 0);
 }
