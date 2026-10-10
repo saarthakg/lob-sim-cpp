@@ -202,9 +202,10 @@ profile shows the time spread across the book operations rather than any one
 hotspot: each message lands on a random one of ~9k books, so the working set
 far exceeds the CPU caches and the cost is memory latency.
 
-The 10:30 snapshot for AAPL, MSFT, AMZN, TSLA and QQQ in the results file
-matches where those names traded that morning: AAPL $286.37 × $286.40,
-MSFT $157.11 × $157.12.
+The results file includes a 10:30 snapshot of the AAPL, MSFT, AMZN, TSLA and
+QQQ books, for example AAPL $286.37 × $286.40 and MSFT $157.11 × $157.12:
+plausible levels for those names in late December 2019, built purely from
+order messages.
 
 ---
 
@@ -650,7 +651,8 @@ The original simulator's headline numbers were artifacts. In order of impact:
 
 ```
 cpp/include, cpp/src   core/ (OrderBook, L3Book, PriceLadder)  marketdata/ (sources, .l3bin, ITCH 5.0)
-                       sim/ (Backtester, ExchangeSim, L3ExchangeSim)  strategy/  util/ (FlatHashMap, ObjectPool)
+                       sim/ (Backtester, ExchangeSim, L3ExchangeSim)  strategy/  live/ (LiveBybitSource)
+                       util/ (FlatHashMap, ObjectPool, SpscRing)
 cpp/app, cpp/bench     lob_sim CLI; lob_bench (L2), lob_bench_l3 (order-level book)
 python/data            download_bybit.py, capture_bitstamp_l3.py (order-level capture)
 python/analysis        signal_research.py, l3_ground_truth.py, queue_model_validation.py, run_report.py
