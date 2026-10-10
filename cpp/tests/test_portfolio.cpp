@@ -1,46 +1,53 @@
-#include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
 #include "../include/sim/portfolio.hpp"
 
-TEST_CASE("Portfolio: realized_pnl and total_pnl are gross of fees", "[portfolio]") {
-    // Regression guard for a real gap: Portfolio deducts fees from cash_ but
-    // never from realized_/total_pnl, so those two are trading PnL only.
-    // Buy 1.00 unit @ 100.00, fee 5.00; sell 1.00 unit @ 110.00, fee 5.00.
-    Portfolio p;
-    p.on_fill(Side::Bid, 10000, 100, 5.0);   // price=100.00, qty=1.00
-    p.on_fill(Side::Ask, 11000, 100, 5.0);   // price=110.00, qty=1.00
+using Catch::Approx;
 
+static Instrument inst() {
+    Instrument i;
+    i.tick_size = 0.01;
+    i.lot_size  = 0.01;
+    return i;
+}
+
+TEST_CASE("Portfolio: round trip realizes PnL; fees tracked separately", "[portfolio]") {
+    Portfolio p(inst());
+    p.on_fill(Side::Bid, 10000, 100, 5.0);   // buy 1.00 @ 100.00
+    p.on_fill(Side::Ask, 11000, 100, 5.0);   // sell 1.00 @ 110.00
     REQUIRE(p.position() == 0);
-    REQUIRE(p.realized_pnl() == Catch::Approx(10.0));   // (110-100)*1.00, no fee deduction
-    REQUIRE(p.total_pnl(110.0) == Catch::Approx(10.0)); // flat, so == realized
-    REQUIRE(p.total_fees_paid() == Catch::Approx(10.0));
+    REQUIRE(p.realized_pnl() == Approx(10.0));
+    REQUIRE(p.total_fees_paid() == Approx(10.0));
+    REQUIRE(p.net_pnl(11000) == Approx(0.0));
+    REQUIRE(p.cash() == Approx(0.0));
+    REQUIRE(p.traded_notional() == Approx(210.0));
 }
 
-TEST_CASE("Portfolio: net_pnl subtracts cumulative fees from total_pnl", "[portfolio]") {
-    Portfolio p;
-    p.on_fill(Side::Bid, 10000, 100, 5.0);
-    p.on_fill(Side::Ask, 11000, 100, 5.0);
-
-    REQUIRE(p.net_pnl(110.0) == Catch::Approx(p.total_pnl(110.0) - p.total_fees_paid()));
-    REQUIRE(p.net_pnl(110.0) == Catch::Approx(0.0));  // $10 gross profit, exactly offset by $10 fees
+TEST_CASE("Portfolio: unrealized PnL marks at a fractional-tick mid", "[portfolio]") {
+    Portfolio p(inst());
+    p.on_fill(Side::Bid, 10000, 200, 0.0);   // long 2 @ 100
+    REQUIRE(p.unrealized_pnl(10050.5) == Approx(2 * 0.505));
+    REQUIRE(p.net_pnl(10050.5) == Approx(p.total_pnl(10050.5)));
 }
 
-TEST_CASE("Portfolio: net_pnl reflects unrealized fees on an open position", "[portfolio]") {
-    Portfolio p;
-    p.on_fill(Side::Bid, 10000, 100, 2.5);  // still long 1.00 @ avg cost 100.00
-
-    REQUIRE(p.position() == 100);
-    REQUIRE(p.total_fees_paid() == Catch::Approx(2.5));
-    // Mark at 105.00: unrealized = (105-100)*1.00 = 5.00, gross total = 5.00
-    REQUIRE(p.total_pnl(105.0) == Catch::Approx(5.0));
-    REQUIRE(p.net_pnl(105.0) == Catch::Approx(2.5));  // 5.00 gross - 2.50 fee paid so far
+TEST_CASE("Portfolio: average cost across adds, partial close, and flip", "[portfolio]") {
+    Portfolio p(inst());
+    p.on_fill(Side::Ask, 10000, 100, 0.0);   // short 1 @ 100
+    p.on_fill(Side::Ask, 10200, 100, 0.0);   // short 2 @ avg 101
+    REQUIRE(p.avg_cost() == Approx(101.0));
+    p.on_fill(Side::Bid, 9900, 100, 0.0);    // cover 1 @ 99 → +2
+    REQUIRE(p.realized_pnl() == Approx(2.0));
+    REQUIRE(p.position() == -100);
+    p.on_fill(Side::Bid, 10000, 300, 0.0);   // cover 1 @ 100 (+1), then long 2 @ 100
+    REQUIRE(p.realized_pnl() == Approx(3.0));
+    REQUIRE(p.position() == 200);
+    REQUIRE(p.avg_cost() == Approx(100.0));
 }
 
-TEST_CASE("Portfolio: total_fees_paid accumulates across many fills", "[portfolio]") {
-    Portfolio p;
-    for (int i = 0; i < 5; ++i) {
-        p.on_fill(Side::Bid, 10000, 20, 1.0);
-    }
-    REQUIRE(p.total_fees_paid() == Catch::Approx(5.0));
-    REQUIRE(p.position() == 100);
+TEST_CASE("Portfolio: rebates make net exceed gross", "[portfolio]") {
+    Portfolio p(inst());
+    p.on_fill(Side::Bid, 10000, 100, -0.01);
+    p.on_fill(Side::Ask, 10000, 100, -0.01);
+    REQUIRE(p.total_pnl(10000) == Approx(0.0));
+    REQUIRE(p.net_pnl(10000) == Approx(0.02));
 }
