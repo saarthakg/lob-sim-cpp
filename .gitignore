@@ -16,3 +16,4 @@ lob-sim-cpp-phase2.md
 results/**/runs/
 results/study_log.txt
 results/*_log.txt
+build-tsan/
