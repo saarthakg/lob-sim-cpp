@@ -52,7 +52,9 @@ def run_one(job: dict) -> dict:
     summary = out / "summary.json"
     if not summary.exists() or job.get("force"):
         cmd = [str(BIN), "--replay", str(job["book"]), "--strategy", job["strategy"],
-               "--output", str(out), "--quiet", "--sample-ms", "1000"]
+               # Sweeps only need summary.json/fills.csv; per-second samples
+               # across thousands of runs filled ~90 GB of disk.
+               "--output", str(out), "--quiet", "--sample-ms", "60000", "--no-book-metrics"]
         if job["trades"]:
             cmd += ["--trades", str(job["trades"])]
         cmd += job["args"]
