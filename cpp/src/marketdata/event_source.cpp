@@ -114,14 +114,14 @@ BybitHistoricalSource::BybitHistoricalSource(Config cfg) : cfg_(std::move(cfg)) 
     book_ = std::make_unique<LineReader>(cfg_.book_path);
     if (!cfg_.trades_path.empty()) trades_ = std::make_unique<LineReader>(cfg_.trades_path);
 
-    if (cfg_.tick_size > 0) tick_scaled_ = static_cast<int64_t>(std::llround(cfg_.tick_size * decimal::SCALE));
-    if (cfg_.lot_size  > 0) lot_scaled_  = static_cast<int64_t>(std::llround(cfg_.lot_size  * decimal::SCALE));
-
     // Prime the book stream; the first message must be a snapshot.
     have_book_ = read_book(pend_book_);
     while (have_book_ && !pend_book_.snapshot) have_book_ = read_book(pend_book_);
     if (!have_book_) throw std::runtime_error("Bybit source: no snapshot in " + cfg_.book_path);
-    detect_instrument(pend_book_);
+    grid_ = bybit::detect_grid(pend_book_, cfg_.tick_size, cfg_.lot_size);
+    inst_.symbol    = cfg_.symbol.empty() ? "BYBIT" : cfg_.symbol;
+    inst_.tick_size = static_cast<double>(grid_.tick_scaled) / decimal::SCALE;
+    inst_.lot_size  = static_cast<double>(grid_.lot_scaled) / decimal::SCALE;
 
     if (trades_) {
         // Skip header row.
@@ -132,90 +132,9 @@ BybitHistoricalSource::BybitHistoricalSource(Config cfg) : cfg_(std::move(cfg)) 
     }
 }
 
-void BybitHistoricalSource::detect_instrument(const RawBook& snap) {
-    inst_.symbol = cfg_.symbol.empty() ? "BYBIT" : cfg_.symbol;
-    if (tick_scaled_ <= 0) {
-        std::vector<int64_t> px;
-        for (auto& l : snap.bids) px.push_back(l.px);
-        for (auto& l : snap.asks) px.push_back(l.px);
-        std::sort(px.begin(), px.end());
-        int64_t g = 0;
-        for (size_t i = 1; i < px.size(); ++i) g = std::gcd(g, px[i] - px[i - 1]);
-        tick_scaled_ = g > 0 ? g : decimal::SCALE / 100;
-    }
-    if (lot_scaled_ <= 0) {
-        int64_t g = 0;
-        for (auto& l : snap.bids) g = std::gcd(g, l.qty);
-        for (auto& l : snap.asks) g = std::gcd(g, l.qty);
-        lot_scaled_ = g > 0 ? g : decimal::SCALE / 1000;
-    }
-    inst_.tick_size = static_cast<double>(tick_scaled_) / decimal::SCALE;
-    inst_.lot_size  = static_cast<double>(lot_scaled_)  / decimal::SCALE;
-}
-
-Price BybitHistoricalSource::to_px(int64_t s) const { return (s + tick_scaled_ / 2) / tick_scaled_; }
-Qty   BybitHistoricalSource::to_qty(int64_t s) const { return (s + lot_scaled_ / 2) / lot_scaled_; }
-
-static const char* find_after(const char* hay, const char* needle) {
-    const char* p = std::strstr(hay, needle);
-    return p ? p + std::strlen(needle) : nullptr;
-}
-
-static int64_t parse_int(const char* p) {
-    int64_t v = 0;
-    while (*p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
-    return v;
-}
-
-// Parses `[["px","qty"],["px","qty"],...]` starting at the first '['.
-static const char* parse_levels(const char* p, std::vector<int64_t>& out_px, std::vector<int64_t>& out_qty) {
-    if (*p != '[') return p;
-    ++p;
-    while (*p == '[') {
-        ++p;              // into pair
-        if (*p == '"') ++p;
-        int64_t px = decimal::parse_scaled(p);
-        if (*p == '"') ++p;
-        if (*p == ',') ++p;
-        if (*p == '"') ++p;
-        int64_t q = decimal::parse_scaled(p);
-        if (*p == '"') ++p;
-        if (*p == ']') ++p;  // close pair
-        out_px.push_back(px);
-        out_qty.push_back(q);
-        if (*p == ',') ++p;
-    }
-    if (*p == ']') ++p;
-    return p;
-}
-
-bool BybitHistoricalSource::read_book(RawBook& out) {
-    static thread_local std::vector<int64_t> px, qty;
+bool BybitHistoricalSource::read_book(bybit::BookMsg& out) {
     while (book_->getline(line_)) {
-        const char* s = line_.c_str();
-        const char* t = find_after(s, "\"type\":\"");
-        if (!t) continue;
-        out.snapshot = (std::strncmp(t, "snapshot", 8) == 0);
-        const char* data = find_after(s, "\"data\":");
-        if (!data) continue;
-
-        out.bids.clear();
-        out.asks.clear();
-        if (const char* b = find_after(data, "\"b\":")) {
-            px.clear(); qty.clear();
-            parse_levels(b, px, qty);
-            for (size_t i = 0; i < px.size(); ++i) out.bids.push_back({px[i], qty[i]});
-        }
-        if (const char* a = find_after(data, "\"a\":")) {
-            px.clear(); qty.clear();
-            parse_levels(a, px, qty);
-            for (size_t i = 0; i < px.size(); ++i) out.asks.push_back({px[i], qty[i]});
-        }
-        // Prefer matching-engine time (cts) — the clock trade prints use.
-        const char* cts = find_after(s, "\"cts\":");
-        const char* ts  = find_after(s, "\"ts\":");
-        int64_t ms = cts ? parse_int(cts) : (ts ? parse_int(ts) : 0);
-        out.ts = ms * 1000;
+        if (!bybit::parse_book(line_.c_str(), out)) continue;
         ++book_msgs_;
         return true;
     }
@@ -271,8 +190,8 @@ bool BybitHistoricalSource::next(MarketEvent& ev) {
         ev.bids.clear();
         ev.asks.clear();
         ev.trade.aggressor = pend_trade_.aggressor;
-        ev.trade.price     = to_px(pend_trade_.px);
-        ev.trade.qty       = to_qty(pend_trade_.qty);
+        ev.trade.price     = grid_.px(pend_trade_.px);
+        ev.trade.qty       = grid_.qty(pend_trade_.qty);
         have_trade_ = read_trade(pend_trade_);
         return true;
     }
@@ -281,8 +200,8 @@ bool BybitHistoricalSource::next(MarketEvent& ev) {
     ev.type = pend_book_.snapshot ? EventType::Snapshot : EventType::Delta;
     ev.bids.clear();
     ev.asks.clear();
-    for (auto& l : pend_book_.bids) ev.bids.push_back({to_px(l.px), to_qty(l.qty)});
-    for (auto& l : pend_book_.asks) ev.asks.push_back({to_px(l.px), to_qty(l.qty)});
+    for (auto& l : pend_book_.bids) ev.bids.push_back({grid_.px(l.px), grid_.qty(l.qty)});
+    for (auto& l : pend_book_.asks) ev.asks.push_back({grid_.px(l.px), grid_.qty(l.qty)});
     have_book_ = read_book(pend_book_);
     return true;
 }

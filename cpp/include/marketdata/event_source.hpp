@@ -1,4 +1,5 @@
 #pragma once
+#include "bybit_parse.hpp"
 #include "market_event.hpp"
 #include "../core/types.hpp"
 #include <cstdio>
@@ -88,12 +89,6 @@ public:
     size_t trade_prints()  const { return trade_msgs_; }
 
 private:
-    struct RawLevel { int64_t px; int64_t qty; };  // decimal::SCALE units
-    struct RawBook {
-        Timestamp ts = 0;
-        bool snapshot = false;
-        std::vector<RawLevel> bids, asks;
-    };
     struct RawTrade { Timestamp ts; Side aggressor; int64_t px; int64_t qty; };
 
     Config cfg_;
@@ -104,17 +99,13 @@ private:
 
     bool     have_book_  = false;
     bool     have_trade_ = false;
-    RawBook  pend_book_;
+    bybit::BookMsg pend_book_;
     RawTrade pend_trade_{};
-    int64_t  tick_scaled_ = 0;
-    int64_t  lot_scaled_  = 0;
+    bybit::Grid grid_;
     size_t   book_msgs_ = 0, trade_msgs_ = 0;
 
-    bool read_book(RawBook& out);
+    bool read_book(bybit::BookMsg& out);
     bool read_trade(RawTrade& out);
-    void detect_instrument(const RawBook& snap);
-    Price to_px(int64_t scaled) const;
-    Qty   to_qty(int64_t scaled) const;
 };
 
 // ── Normalized CSV (this project's own capture format) ───────────────────────
