@@ -1,0 +1,27 @@
+[train] 48 parameter sets x 4 days
+                                                                                              mean     std      min  count
+param_id params                                                                                                           
+39       alpha-scale=2 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0.05 -23.602  48.513  -94.862      4
+23       alpha-scale=1 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0.05 -28.884  40.560  -88.593      4
+47       alpha-scale=2 pull-threshold=0.15 levels=4 depletion-pull=0.3 inventory-skew=0.05 -31.369  47.903 -101.654      4
+35       alpha-scale=2 pull-threshold=0.05 levels=2 depletion-pull=0.3 inventory-skew=0.05 -34.430  38.522  -87.089      4
+19       alpha-scale=1 pull-threshold=0.05 levels=2 depletion-pull=0.3 inventory-skew=0.05 -39.771  29.639  -80.620      4
+43       alpha-scale=2 pull-threshold=0.15 levels=2 depletion-pull=0.3 inventory-skew=0.05 -40.052  34.661  -89.485      4
+37       alpha-scale=2 pull-threshold=0.05 levels=4 depletion-pull=0 inventory-skew=0.05   -40.876  51.086 -115.011      4
+22       alpha-scale=1 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0    -44.617  45.666 -112.374      4
+38       alpha-scale=2 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0    -45.075  44.928 -111.953      4
+46       alpha-scale=2 pull-threshold=0.15 levels=4 depletion-pull=0.3 inventory-skew=0    -46.424  58.739 -131.511      4
+[select] alpha-scale=2 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0.05
+[test] 1 parameter sets x 4 days
+       day split                                                                            params  maker_fills  taker_fills  notional  gross_pnl  fees  net_pnl  net_pnl_flat  net_bps_of_notional  edge  markout_5s  max_drawdown  max_abs_position
+2026-10-02  test alpha-scale=2 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0.05         1720            0 171844.58     -25.17   0.0   -25.17        -25.33                -1.46 45.54      -24.71         52.31            1018.9
+2026-10-03  test alpha-scale=2 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0.05         1077            0 100845.55      -9.65   0.0    -9.65         -9.66                -0.96 19.33      -22.22         18.94             901.4
+2026-10-04  test alpha-scale=2 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0.05         2386            0 220224.32     -76.32   0.0   -76.32        -76.33                -3.47 64.79      -65.83         82.06            1102.8
+2026-10-05  test alpha-scale=2 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0.05         2000            0 195913.41     -12.28   0.0   -12.28        -12.42                -0.63 63.85      -24.06         20.23            1006.9
+
+Test-day net PnL by parameter set: mean / std / % days positive / total
+                                                                                    mean    std  pct_pos   total
+params                                                                                                          
+alpha-scale=2 pull-threshold=0.05 levels=4 depletion-pull=0.3 inventory-skew=0.05 -30.85  31.06      0.0 -123.42
+
+wrote /Users/saarthakgupta/code/Finance Project/lob-sim-cpp/results/study/ATOMUSDT_ladder_zero/results.csv

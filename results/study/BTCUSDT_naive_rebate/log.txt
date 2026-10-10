@@ -1,0 +1,17 @@
+[test] 1 parameter sets x 8 days
+       day split  params  maker_fills  taker_fills    notional  gross_pnl     fees  net_pnl  net_pnl_flat  net_bps_of_notional     edge  markout_5s  max_drawdown  max_abs_position
+2026-09-28  test default       235460            0 42903436.97   -3716.49 -2145.17 -1571.32      -1573.48                -0.37  -348.52    -3521.97       1575.91               0.1
+2026-09-29  test default       204150            0 45639644.93   -3674.39 -2281.98 -1392.41      -1394.99                -0.31  -547.21    -3647.49       1403.71               0.1
+2026-09-30  test default       188625            0 55656619.70   -4976.45 -2782.83 -2193.62      -2196.66                -0.39 -1458.99    -4651.32       2196.67               0.1
+2026-10-01  test default       168061            0 52624673.74   -4520.86 -2631.23 -1889.63      -1894.06                -0.36 -1221.63    -4548.09       1894.00               0.1
+2026-10-02  test default       185406            0 67339972.63   -5900.34 -3367.00 -2533.34      -2535.76                -0.38 -1735.69    -5817.40       2533.78               0.1
+2026-10-03  test default        19468            0  8238944.73    -608.78  -411.95  -196.84       -199.26                -0.24  -131.76     -516.55        200.08               0.1
+2026-10-04  test default        43713            0 16148923.38   -1407.58  -807.45  -600.14       -601.42                -0.37  -342.51    -1269.08        602.57               0.1
+2026-10-05  test default       146431            0 46368310.70   -3799.57 -2318.42 -1481.15      -1485.45                -0.32 -1062.61    -3726.21       1484.98               0.1
+
+Test-day net PnL by parameter set: mean / std / % days positive / total
+           mean     std  pct_pos     total
+params                                    
+default -1482.3  776.73      0.0 -11858.44
+
+wrote /Users/saarthakgupta/code/Finance Project/lob-sim-cpp/results/study/BTCUSDT_naive_rebate/results.csv
