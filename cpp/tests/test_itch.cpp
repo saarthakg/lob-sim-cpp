@@ -57,11 +57,11 @@ TEST_CASE("ITCH 5.0: messages build the expected order-level book", "[itch]") {
     REQUIRE(b.find_symbol("AAPL") == 7);
     const L3Book* bk = b.book(7);
     REQUIRE(bk != nullptr);
-    REQUIRE(b.units_per_usd(7) == 100.0);             // cents book for a $150 stock
-    REQUIRE(bk->best_price(Side::Bid) == 15000);
+    REQUIRE(bk->best_price(Side::Bid) == ItchBookBuilder::to_ticks(1500000));
+    REQUIRE(ItchBookBuilder::to_usd(bk->best_price(Side::Bid)) == 150.0);
     REQUIRE(bk->best_qty(Side::Bid) == 210);
     REQUIRE(bk->queue_ahead(2) == 60);                // order 1 still ahead of 2
-    REQUIRE(bk->best_price(Side::Ask) == 15002);
+    REQUIRE(ItchBookBuilder::to_usd(bk->best_price(Side::Ask)) == 150.02);
     REQUIRE_FALSE(bk->contains(3));
     REQUIRE(bk->find(4)->qty == 70);
     REQUIRE(b.stats().unknown_ref == 1);
@@ -80,6 +80,13 @@ TEST_CASE("ITCH 5.0: a partial trailing message is left for the next buffer", "[
     REQUIRE(b.stats().adds == 1);
     itch::parse_itch(w.buf.data() + used, w.buf.size() - used, b);
     REQUIRE(b.stats().adds == 2);
-    REQUIRE(b.units_per_usd(1) == 10000.0);
-    REQUIRE(b.book(1)->best_price(Side::Ask) == 4999);
+    REQUIRE(b.book(1)->best_price(Side::Ask) == 4999);   // sub-dollar: exact 1/10,000 units
+}
+
+TEST_CASE("ITCH price map is exact and order-preserving across $1", "[itch]") {
+    // A $0.0001 stub bid on a $12 stock is legal: sub-penny is allowed below $1.
+    REQUIRE(ItchBookBuilder::to_ticks(1) < ItchBookBuilder::to_ticks(9999));
+    REQUIRE(ItchBookBuilder::to_ticks(9999) < ItchBookBuilder::to_ticks(10000));
+    REQUIRE(ItchBookBuilder::to_ticks(10000) + 1 == ItchBookBuilder::to_ticks(10100));
+    for (uint32_t p : {1u, 9999u, 10000u, 123400u, 99999900u}) REQUIRE(ItchBookBuilder::to_usd(ItchBookBuilder::to_ticks(p)) * 1e4 == p);
 }

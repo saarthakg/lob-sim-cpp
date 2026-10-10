@@ -1,27 +1,23 @@
 #include "../../include/marketdata/itch_book_builder.hpp"
 
 ItchBookBuilder::ItchBookBuilder(int log2_window)
-    : log2_window_(log2_window), books_(65536), scale_(65536, 0), symbols_(65536) {}
+    : log2_window_(log2_window), books_(65536), symbols_(65536) {}
 
-L3Book& ItchBookBuilder::get(uint16_t loc, uint32_t first_price) {
+L3Book& ItchBookBuilder::get(uint16_t loc) {
     auto& b = books_[loc];
-    if (!b) {
-        b = std::make_unique<L3Book>(log2_window_, 64);
-        scale_[loc] = first_price >= 10000 ? 100 : 1;
-    }
+    if (!b) b = std::make_unique<L3Book>(log2_window_, 64);
     return *b;
 }
 
-Price ItchBookBuilder::to_px(uint16_t loc, uint32_t price) {
-    const uint32_t s = scale_[loc];
-    if (s == 100 && price % 100 != 0) ++stats_.subpenny_violations;
-    return static_cast<Price>(s == 100 ? (price + 50) / 100 : price);
+Price ItchBookBuilder::to_px(uint32_t price) {
+    if (price >= 10000 && price % 100 != 0) ++stats_.subpenny_violations;
+    return to_ticks(price);
 }
 
 void ItchBookBuilder::on_add(uint16_t loc, uint64_t, uint64_t ref, uint8_t side, uint32_t shares, uint32_t price) {
     ++stats_.adds;
-    L3Book& b = get(loc, price);
-    if (!b.add(ref, side == 'B' ? Side::Bid : Side::Ask, to_px(loc, price), shares)) ++stats_.duplicate_add;
+    L3Book& b = get(loc);
+    if (!b.add(ref, side == 'B' ? Side::Bid : Side::Ask, to_px(price), shares)) ++stats_.duplicate_add;
 }
 
 void ItchBookBuilder::on_execute(uint16_t loc, uint64_t, uint64_t ref, uint32_t shares) {
@@ -54,7 +50,7 @@ void ItchBookBuilder::on_replace(uint16_t loc, uint64_t, uint64_t old_ref, uint6
     if (!o) { ++stats_.unknown_ref; return; }
     const Side side = o->side;   // a replace keeps the side; it loses time priority
     b->cancel(old_ref);
-    if (!b->add(new_ref, side, to_px(loc, price), shares)) ++stats_.duplicate_add;
+    if (!b->add(new_ref, side, to_px(price), shares)) ++stats_.duplicate_add;
 }
 
 void ItchBookBuilder::on_directory(uint16_t loc, const char* stock8) {
