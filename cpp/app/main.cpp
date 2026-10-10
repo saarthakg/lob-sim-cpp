@@ -6,6 +6,7 @@
 #include "../include/strategy/imbalance_strategy.hpp"
 #include "../include/strategy/ladder_market_maker.hpp"
 #include "../include/strategy/naive_market_maker.hpp"
+#include "../include/strategy/probe_strategy.hpp"
 #include "../include/strategy/twap_strategy.hpp"
 #include "../include/util/timer.hpp"
 #include "live_capture.hpp"
@@ -62,6 +63,7 @@ Strategy
   naive:     --offset-ticks N
   imbalance: --threshold T --hold-ms H
   twap:      --side buy|sell --slices N --interval-s S --passive
+  probe:     --probes <csv> --side buy|sell   (fill-model validation against L3 truth)
 
 Output
   --output <dir>    write summary.json, fills.csv, equity.csv, book_metrics.csv
@@ -230,6 +232,12 @@ static std::unique_ptr<Strategy> make_strategy(const std::string& name, const Ar
         c.hold_us   = static_cast<int64_t>(a.num("--hold-ms", 5000) * 1000);
         return std::make_unique<ImbalanceStrategy>(c);
     }
+    if (name == "probe") {
+        // Fill-model validation; see python/analysis/queue_model_validation.py.
+        Side side = a.str("--side", "buy") == "sell" ? Side::Ask : Side::Bid;
+        return std::make_unique<ProbeStrategy>(a.str("--probes"), side, inst,
+                                               out_dir.empty() ? "" : out_dir + "/probe_orders.csv");
+    }
     if (name == "twap") {
         TwapStrategy::Config c;
         c.side        = a.str("--side", "buy") == "sell" ? Side::Ask : Side::Bid;
@@ -278,6 +286,7 @@ static int run_replay(EventSource& src, const Args& a) {
     int levels    = static_cast<int>(a.num("--levels", 1));
     // Gateway limit: strategy limit plus room for a full ladder of resting orders.
     cfg.max_position = max_pos + order_qty * levels;
+    if (strat_name == "probe") cfg.max_position = 0;  // probes accumulate by design
 
     std::unique_ptr<Strategy> strat;
     if (strat_name.empty() || strat_name == "none") {
