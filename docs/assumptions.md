@@ -73,9 +73,19 @@ Boundary behaviour:
 >
 > An order that joined an existing level could never fill.
 
-**Bracketing.** `--no-cross-fill` drops the book-cross rule, so only trade
-prints fill us. That is the optimistic bound: it assumes we always escape a
-level that collapses through cancellations. The study reports both bounds.
+**Bracketing, and why the default holds up.** `--no-cross-fill` drops the
+book-cross rule, so only trade prints fill us. It was meant as an optimistic
+bound: it assumes we always escape a level that collapses through
+cancellations.
+
+Validation against Bitstamp order-level ground truth
+(`results/queue_validation/`) shows it is not realistic. It misses 44–84% of
+real fills on ETH/USD and XRP/USD, where most fills come from price moving
+through the order. The default rule matches ground truth at 0.96–1.00
+accuracy.
+
+The same validation compared the queue models. Power-2 (default) is
+calibrated on BTC/USD. Log over-fills by about 31%.
 
 ## Latency: three channels, deterministic plus optional jitter
 
