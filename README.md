@@ -8,8 +8,8 @@ itself. It runs entirely on **free public data**.
 
 | | |
 |---|---|
-| **Speed** | Book updates at 12–16M events/s; backtest loop with a strategy at 1.7–2.2M events/s. A full day of BTCUSDT (860k book updates, 320k trades) replays in about 2.5 s, streamed straight from compressed exchange archives. |
-| **Fidelity** | Fills come from trade prints and queue position, not price touches. The fill model is **validated against order-level (L3) ground truth**: the default queue model predicts real fill rates within 4% on BTC/USD. Feed, order-entry and response latency are modelled separately, so stale quotes really do get picked off. |
+| **Speed** | Order-level (L3) book at **50M msgs/s, 18 ns p50 / 46 ns p99 per operation**, 5× a `std::map`/`std::list` book. A real Bitstamp feed replays at 21M records/s. The backtest loop with a strategy runs at 1.7–2.2M events/s; a full day of BTCUSDT replays in about 2.5 s straight from compressed exchange archives. |
+| **Fidelity** | On order-level data, our simulated orders sit in the **real FIFO queue**. Against independent L3 ground truth the exact-queue exchange matches real fills with 0.995 accuracy and 1.000 precision. On L2-only data, a queue model is used instead; it is calibrated against the same ground truth (fill rates within 4%). Feed, order-entry and response latency are modelled separately, so stale quotes really do get picked off. |
 | **Rigour** | Walk-forward parameter selection; 16 out-of-sample days; sensitivity sweeps over latency, queue model and fill rule; and a **pre-registered** confirmation test on 30 untouched days. |
 
 **What the platform found** ([Results](#results)):
@@ -42,6 +42,7 @@ itself. It runs entirely on **free public data**.
 ## Contents
 
 - [Quickstart](#quickstart)
+- [Order-level (L3) engine](#order-level-l3-engine)
 - [How the simulator works](#how-the-simulator-works)
 - [Strategies](#strategies)
 - [Research workflow](#research-workflow)
@@ -79,6 +80,61 @@ python/.venv/bin/python python/analysis/run_report.py --run data/processed/glft_
 Run `./build/lob_sim --help` for every option: fees (negative = rebate), queue
 model, the fill-model bracket, per-channel latency and jitter, and strategy
 parameters.
+
+---
+
+## Order-level (L3) engine
+
+`L3Book` is a full order-level book with strict price-time priority, built
+for replaying an exchange's raw order feed.
+
+```
+ order id ──FlatHashMap──▶ pool index ──▶ Order {prev,next,level}  ◀── intrusive FIFO per price level
+                                                 │
+ price ──PriceLadder (bitmap window + overflow)──▶ Level {head,tail,total,count}
+```
+
+| Design choice | Why |
+|---|---|
+| Orders in an index-based `ObjectPool`, linked into intrusive doubly linked FIFOs | O(1) add, cancel, modify and execute, with no search inside a level; 32-bit links keep orders dense; no malloc once warmed up |
+| `FlatHashMap` (open addressing, linear probing, backward-shift deletion) for order id → order | One or two cache lines per lookup; no tombstones, so probe lengths don't degrade under real feeds where most orders are cancelled |
+| `PriceLadder`: a dense price window with a two-level occupancy bitmap, plus a map for far prices | Finding the next best price after the touch empties is a couple of `ctz`/`clz` instructions, not a tree walk; the window recentres when the market drifts |
+
+**Correctness.** A 300k-operation randomized differential test checks every
+step against a `std::map`/`std::list` reference book, including identical
+maker fill sequences from `match()`. Tests: `cpp/tests/test_l3_book.cpp`.
+
+**Speed** (`lob_bench_l3`, 5M-message order-level stream: 50% add, 40%
+cancel, executes and sweeps; ~20k resting orders; Apple M-series):
+
+| Book | Throughput | p50 | p90 | p99 | p99.9 |
+|---|---|---|---|---|---|
+| **L3Book** | **50.1M msg/s** | **18 ns** | **23 ns** | **46 ns** | **143 ns** |
+| `std::map` + `std::list` + `std::unordered_map` | 10.4M msg/s | 91 ns | 109 ns | 189 ns | 323 ns |
+
+**Real exchange data.**
+- `python/data/capture_bitstamp_l3.py` records Bitstamp's public order-level
+  feed; `lob_sim --convert-bitstamp-l3` turns it into a fixed-record binary
+  format (`.l3bin`).
+- `lob_sim --replay-l3` replays it.
+- 70 minutes of BTC/USD (472k events) replays at **21M records/s**, with zero
+  unknown order references.
+
+**Exact-queue exchange.** On `.l3bin` data the backtester uses
+`L3ExchangeSim`. Our orders are inserted into the real FIFO, so every later
+market order queues behind us and every cancel ahead moves us up. A trade
+print fills us exactly when the matching engine would have reached our order
+before the real maker. Scored against the independent L3 ground truth
+(`python/analysis/queue_model_validation.py`):
+
+| BTC/USD, 60 s horizon (58% of fills queue-driven) | Fill rate (true 0.296) | Accuracy | Precision |
+|---|---|---|---|
+| **Exact-queue L3 exchange** | **0.291** | **0.995** | **1.000** |
+| Best L2 queue model (Power-2) | 0.284 | 0.959 | 0.949 |
+| Log queue model | 0.387 | 0.879 | 0.726 |
+
+Every strategy runs unchanged on both data paths, and `--exchange-model l2`
+scores the queue model on the same L3 market for a direct comparison.
 
 ---
 
@@ -476,8 +532,10 @@ The original simulator's headline numbers were artifacts. In order of impact:
 ## Repository layout
 
 ```
-cpp/include, cpp/src   core/ marketdata/ sim/ strategy/      app/main.cpp CLI   bench/ tests/
-python/data            download_bybit.py, capture_bitstamp_l3.py
+cpp/include, cpp/src   core/ (OrderBook, L3Book, PriceLadder)  marketdata/ (sources, .l3bin)
+                       sim/ (Backtester, ExchangeSim, L3ExchangeSim)  strategy/  util/ (FlatHashMap, ObjectPool)
+cpp/app, cpp/bench     lob_sim CLI; lob_bench (L2), lob_bench_l3 (order-level book)
+python/data            download_bybit.py, capture_bitstamp_l3.py (order-level capture)
 python/analysis        signal_research.py, l3_ground_truth.py, queue_model_validation.py, run_report.py
 python/experiments     run_backtests.py, study.py, summarize_study.py
 results/               study tables, fitted signals, taker/execution summary, queue validation
