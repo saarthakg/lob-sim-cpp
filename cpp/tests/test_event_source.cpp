@@ -114,3 +114,26 @@ TEST_CASE("Legacy v1 CSV groups rows by update id", "[source]") {
     REQUIRE_FALSE(src.next(ev));
     std::remove(path.c_str());
 }
+
+TEST_CASE("bybit::parse_trades reads live publicTrade messages", "[source]") {
+    const char* msg = R"({"topic":"publicTrade.BTCUSDT","type":"snapshot","ts":1700000000100,"data":[{"T":1700000000099,"s":"BTCUSDT","S":"Sell","v":"0.010","p":"84475.90","L":"MinusTick","i":"a","BT":false,"RPI":false},{"T":1700000000100,"s":"BTCUSDT","S":"Buy","v":"0.002","p":"84476.00","L":"PlusTick","i":"b","BT":false,"RPI":true}]})";
+    std::vector<bybit::TradeMsg> out;
+    REQUIRE(bybit::parse_trades(msg, out) == 2);
+    REQUIRE(out[0].ts == 1700000000099000LL);
+    REQUIRE(out[0].aggressor == Side::Ask);
+    REQUIRE(out[0].qty == 10'000'000LL);            // 0.010 × 1e9
+    REQUIRE(out[0].px == 84475900000000LL);
+    REQUIRE_FALSE(out[0].rpi);
+    REQUIRE(out[1].aggressor == Side::Bid);
+    REQUIRE(out[1].rpi);
+}
+
+TEST_CASE("bybit::parse_book reads a live orderbook delta", "[source]") {
+    const char* msg = R"({"topic":"orderbook.50.BTCUSDT","type":"delta","ts":1700000000200,"data":{"s":"BTCUSDT","b":[["84475.90","1.5"]],"a":[["84476.00","0"]],"u":5,"seq":9},"cts":1700000000198})";
+    bybit::BookMsg m;
+    REQUIRE(bybit::parse_book(msg, m));
+    REQUIRE_FALSE(m.snapshot);
+    REQUIRE(m.ts == 1700000000198000LL);
+    REQUIRE(m.bids.size() == 1);
+    REQUIRE(m.asks[0].qty == 0);
+}
