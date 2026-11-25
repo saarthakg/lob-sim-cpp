@@ -18,3 +18,4 @@ results/study_log.txt
 results/*_log.txt
 build-tsan/
 build-asan/
+build-dev/
