@@ -7,6 +7,7 @@
 #include "../include/marketdata/event_source.hpp"
 #include "../include/marketdata/parser.hpp"
 #include "../include/sim/backtester.hpp"
+#include "../include/strategy/execution_strategy.hpp"
 #include "../include/strategy/glft_market_maker.hpp"
 #include "../include/strategy/imbalance_strategy.hpp"
 #include "../include/strategy/ladder_market_maker.hpp"
@@ -37,7 +38,7 @@ static void print_help() {
 Usage: lob_sim <mode> [options]
 
 Modes
-  --replay <book> [--trades <trades>] [--strategy glft|ladder|naive|imbalance|twap]
+  --replay <book> [--trades <trades>] [--strategy glft|ladder|naive|imbalance|twap|exec]
         Event-driven backtest. <book> is either a Bybit historical order book
         file (*_ob200.data[.zip], from quote-saver.bycsi.com) or a normalized
         CSV from --live-capture. <trades> is a Bybit trades file
@@ -107,6 +108,8 @@ Strategy
   naive:     --offset-ticks N
   imbalance: --threshold T --hold-ms H
   twap:      --side buy|sell --slices N --interval-s S --passive
+  exec:      --algo cross|join|peg|smart --slices N --horizon-s S --gap-s S --cross-imbalance I
+             (parents of N x order-size back to back, alternating sides -> executions.csv)
   probe:     --probes <csv> --side buy|sell   (fill-model validation against L3 truth)
 
 Output
@@ -157,7 +160,7 @@ static const std::set<std::string> kOptions = {
     "--strategy", "--order-size", "--max-position", "--gamma", "--levels", "--half-spread-mult", "--skew-mult",
     "--alpha-micro", "--alpha-obi", "--alpha-scale", "--obi-band-bps", "--min-half-spread-ticks", "--warmup-s",
     "--max-depth-ticks", "--depletion-pull", "--pull-threshold", "--inventory-skew", "--max-spread-ticks",
-    "--offset-ticks", "--threshold", "--hold-ms", "--side", "--slices", "--interval-s", "--probes"};
+    "--offset-ticks", "--threshold", "--hold-ms", "--algo", "--horizon-s", "--gap-s", "--cross-imbalance", "--side", "--slices", "--interval-s", "--probes"};
 
 static size_t edit_distance(const std::string& a, const std::string& b) {
     std::vector<size_t> row(b.size() + 1);
@@ -364,6 +367,19 @@ static std::unique_ptr<Strategy> make_strategy(const std::string& name, const Ar
         return std::make_unique<ProbeStrategy>(a.str("--probes"), side, inst,
                                                out_dir.empty() ? "" : out_dir + "/probe_orders.csv");
     }
+    if (name == "exec") {
+        ExecutionStrategy::Config c;
+        c.algo = choose<ExecutionStrategy::Algo>(a, "--algo", "cross",
+            {{"cross", ExecutionStrategy::Algo::Cross}, {"join", ExecutionStrategy::Algo::Join},
+             {"peg", ExecutionStrategy::Algo::Peg}, {"smart", ExecutionStrategy::Algo::Smart}});
+        c.slices          = static_cast<int>(a.num("--slices", c.slices));
+        c.parent_qty      = order_qty * c.slices;
+        c.horizon_us      = static_cast<int64_t>(a.num("--horizon-s", 300) * 1e6);
+        c.gap_us          = static_cast<int64_t>(a.num("--gap-s", 60) * 1e6);
+        c.cross_imbalance = a.num("--cross-imbalance", c.cross_imbalance);
+        if (!out_dir.empty()) c.csv_path = out_dir + "/executions.csv";
+        return std::make_unique<ExecutionStrategy>(c);
+    }
     if (name == "twap") {
         TwapStrategy::Config c;
         c.side        = choose<Side>(a, "--side", "buy", {{"buy", Side::Bid}, {"sell", Side::Ask}});
@@ -436,6 +452,7 @@ static int run_replay(EventSource& src, const Args& a) {
     cfg.max_position = max_pos + order_qty * levels;
     if (strat_name == "probe") cfg.max_position = 0;  // probes accumulate by design
     // An execution algo's parent quantity *is* its position limit.
+    if (strat_name == "exec") cfg.max_position = 0;   // parents alternate sides; bounded by construction
     if (strat_name == "twap")
         cfg.max_position = order_qty * static_cast<Qty>(a.num("--slices", 20));
 
