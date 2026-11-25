@@ -26,8 +26,8 @@ Nasdaq's full order feed.
   out of sample, and on BTC it is profitable before costs when trading on it as a
   taker.
 - **Passive execution beats crossing the spread** by 2.4-3.7 bp per parent
-  order, on all 50 days and all four symbols (12,000 paired parents each), and
-  under a pessimistic queue model.
+  order, on all 50 days and all four symbols (12,000 paired parents each). Under
+  the harshest fill assumptions it still saves 1.6-2.3 bp, on every day.
 - **Retail-latency market making is still not profitable.** Adverse selection
   outweighs the spread captured at every fee tier tested, including a maker
   rebate. The platform quantifies the gap: how much edge, how fast a reaction
@@ -623,25 +623,30 @@ fitted. 5 ms each-way latency, VIP0 fees
 ([results/execution/EXECUTION.md](results/execution/EXECUTION.md),
 `python python/experiments/execution_study.py`).
 
-| Saving against crossing the spread (bp, fees included) | Join | Peg | Smart | Peg, pessimistic queue |
-|---|---|---|---|---|
-| BTCUSDT | +2.04 | **+2.38** | +1.27 | +2.30 |
-| ATOMUSDT | +2.59 | **+3.56** | +2.37 | +3.48 |
-| XLMUSDT | +2.79 | **+3.69** | +2.47 | +3.60 |
-| ADAUSDT | +2.72 | **+3.42** | +2.77 | +3.32 |
+| Saving against crossing (bp, fees included) | Join | Peg | Smart | Peg, pessimistic queue | Peg, prints only | Peg, both (lower bound) |
+|---|---|---|---|---|---|---|
+| BTCUSDT | +2.04 | **+2.38** | +1.27 | +2.30 | +2.35 | +2.25 |
+| ATOMUSDT | +2.59 | **+3.56** | +2.37 | +3.48 | +1.99 | +1.64 |
+| XLMUSDT | +2.79 | **+3.69** | +2.47 | +3.60 | +2.47 | +1.97 |
+| ADAUSDT | +2.72 | **+3.42** | +2.77 | +3.32 | +2.55 | +2.12 |
 
 ![Execution savings](docs/plots/execution_savings.png)
 
 - **Every passive algorithm beat crossing on every one of the 50 days, on every
-  symbol.** Day-clustered t-statistics are 31 to 101.
+  symbol, under every fill assumption.** Day-clustered t-statistics are 27 to 103.
 - **Pegging is best**: follow the touch, then sweep what is left at the end of
   the slot. It fills 74-93% passively.
 - **The imbalance signal did not help execution.** Crossing early when the book
   leans your way (Smart) improves the price but pays the taker fee more often.
 - **Where the saving comes from.** On BTCUSDT pegging saves 3.3 bp of fees and
   gives back 0.9 bp of price. On the large-tick contracts it wins on both.
-- **It does not depend on the queue model.** Assuming cancellations ahead never
-  help us moves the result by less than 0.1 bp.
+- **How much depends on the fill model.** Assuming cancellations ahead never help
+  us ("pessimistic queue") costs under 0.1 bp. Dropping the rule that the
+  opposite quote reaching our price fills us ("prints only") costs up to 1.6 bp
+  on the large-tick contracts and nothing on BTC. Under both, the saving is
+  1.6-2.3 bp. Removing liquidity that has already printed between book updates
+  (`--consume-prints`) moves every figure by 0.06 bp or less
+  ([EXECUTION_CONSUMED.md](results/execution/EXECUTION_CONSUMED.md)).
 
 > An earlier version of this section reported a 1.8 bp saving from *four*
 > executions, one per day, and called it robust. This study replaces it. The
