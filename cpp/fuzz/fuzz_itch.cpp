@@ -5,7 +5,7 @@
 #include <cstdlib>
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-    ItchBookBuilder b;
+    ItchBookBuilder b(12, 8);   // few locates: keeps the fuzzer fast
     if (itch::parse_itch(data, size, b) > size) std::abort();
     for (int loc = 0; loc < 8; ++loc) {
         const L3Book* bk = b.book(static_cast<uint16_t>(loc));

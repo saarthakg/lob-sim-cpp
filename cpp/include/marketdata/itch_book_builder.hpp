@@ -31,7 +31,9 @@ public:
         std::array<uint64_t, 256> by_type{};
     };
 
-    explicit ItchBookBuilder(int log2_window = 12);
+    // `max_locates` sizes the per-symbol tables; messages with a larger locate
+    // are counted as malformed. The default covers every 16-bit locate.
+    explicit ItchBookBuilder(int log2_window = 12, size_t max_locates = 65536);
 
     // itch::parse_itch handler interface
     void on_add(uint16_t loc, uint64_t ts, uint64_t ref, uint8_t side, uint32_t shares, uint32_t price);
@@ -51,7 +53,7 @@ public:
     void on_malformed(uint8_t) { ++stats_.malformed; }
 
     const Stats& stats() const { return stats_; }
-    const L3Book* book(uint16_t loc) const { return books_[loc].get(); }
+    const L3Book* book(uint16_t loc) const { return loc < books_.size() ? books_[loc].get() : nullptr; }
     const std::string& symbol(uint16_t loc) const { return symbols_[loc]; }
     // ITCH price (1/10,000 USD) <-> book ticks.
     static Price to_ticks(uint32_t itch_price) {
@@ -72,6 +74,7 @@ private:
     std::vector<std::string> symbols_;
     Stats stats_;
 
-    L3Book& get(uint16_t loc);
+    L3Book* get(uint16_t loc);   // created on first use; nullptr if out of range
+    L3Book* lookup(uint16_t loc) { return loc < books_.size() ? books_[loc].get() : nullptr; }
     Price to_px(uint32_t price);
 };

@@ -1,12 +1,16 @@
 #include "../../include/marketdata/itch_book_builder.hpp"
 
-ItchBookBuilder::ItchBookBuilder(int log2_window)
-    : log2_window_(log2_window), books_(65536), symbols_(65536) {}
+ItchBookBuilder::ItchBookBuilder(int log2_window, size_t max_locates)
+    : log2_window_(log2_window), books_(max_locates), symbols_(max_locates) {}
 
-L3Book& ItchBookBuilder::get(uint16_t loc) {
+L3Book* ItchBookBuilder::get(uint16_t loc) {
+    if (loc >= books_.size()) {
+        ++stats_.malformed;
+        return nullptr;
+    }
     auto& b = books_[loc];
     if (!b) b = std::make_unique<L3Book>(log2_window_, 64);
-    return *b;
+    return b.get();
 }
 
 Price ItchBookBuilder::to_px(uint32_t price) {
@@ -16,20 +20,21 @@ Price ItchBookBuilder::to_px(uint32_t price) {
 
 void ItchBookBuilder::on_add(uint16_t loc, uint64_t, uint64_t ref, uint8_t side, uint32_t shares, uint32_t price) {
     ++stats_.adds;
-    L3Book& b = get(loc);
-    if (!b.add(ref, side == 'B' ? Side::Bid : Side::Ask, to_px(price), shares)) ++stats_.duplicate_add;
+    L3Book* b = get(loc);
+    if (!b) return;
+    if (!b->add(ref, side == 'B' ? Side::Bid : Side::Ask, to_px(price), shares)) ++stats_.duplicate_add;
 }
 
 void ItchBookBuilder::on_execute(uint16_t loc, uint64_t, uint64_t ref, uint32_t shares) {
     ++stats_.executes;
-    L3Book* b = books_[loc].get();
+    L3Book* b = lookup(loc);
     if (!b || !b->contains(ref)) { ++stats_.unknown_ref; return; }
     if (b->execute(ref, shares) < static_cast<Qty>(shares)) ++stats_.over_execute;
 }
 
 void ItchBookBuilder::on_cancel(uint16_t loc, uint64_t, uint64_t ref, uint32_t shares) {
     ++stats_.cancels;
-    L3Book* b = books_[loc].get();
+    L3Book* b = lookup(loc);
     const L3Book::Order* o = b ? b->find(ref) : nullptr;
     if (!o) { ++stats_.unknown_ref; return; }
     if (static_cast<Qty>(shares) > o->qty) ++stats_.over_execute;
@@ -38,14 +43,14 @@ void ItchBookBuilder::on_cancel(uint16_t loc, uint64_t, uint64_t ref, uint32_t s
 
 void ItchBookBuilder::on_delete(uint16_t loc, uint64_t, uint64_t ref) {
     ++stats_.deletes;
-    L3Book* b = books_[loc].get();
+    L3Book* b = lookup(loc);
     if (!b || !b->cancel(ref)) ++stats_.unknown_ref;
 }
 
 void ItchBookBuilder::on_replace(uint16_t loc, uint64_t, uint64_t old_ref, uint64_t new_ref, uint32_t shares,
                                  uint32_t price) {
     ++stats_.replaces;
-    L3Book* b = books_[loc].get();
+    L3Book* b = lookup(loc);
     const L3Book::Order* o = b ? b->find(old_ref) : nullptr;
     if (!o) { ++stats_.unknown_ref; return; }
     const Side side = o->side;   // a replace keeps the side; it loses time priority
@@ -54,6 +59,7 @@ void ItchBookBuilder::on_replace(uint16_t loc, uint64_t, uint64_t old_ref, uint6
 }
 
 void ItchBookBuilder::on_directory(uint16_t loc, const char* stock8) {
+    if (loc >= symbols_.size()) return;
     std::string s(stock8, 8);
     while (!s.empty() && s.back() == ' ') s.pop_back();
     symbols_[loc] = s;
