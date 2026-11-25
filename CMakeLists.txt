@@ -51,6 +51,7 @@ file(GLOB_RECURSE LOB_CORE_SRCS CONFIGURE_DEPENDS
   "cpp/src/marketdata/*.cpp"
   "cpp/src/sim/*.cpp"
   "cpp/src/strategy/*.cpp"
+  "cpp/src/util/*.cpp"
 )
 
 add_library(lob_core STATIC ${LOB_CORE_SRCS})

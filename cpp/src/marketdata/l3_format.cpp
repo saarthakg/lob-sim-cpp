@@ -11,7 +11,8 @@ using json = nlohmann::json;
 
 // ── writer ───────────────────────────────────────────────────────────────────
 
-L3FileWriter::L3FileWriter(const std::string& path, const std::string& symbol, double tick, double lot) {
+L3FileWriter::L3FileWriter(const std::string& path, const std::string& symbol, double tick, double lot)
+    : path_(path) {
     f_ = std::fopen(path.c_str(), "wb");
     if (!f_) throw std::runtime_error("L3FileWriter: cannot open " + path);
     std::memcpy(hdr_.magic, "LOBSIML3", 8);
@@ -30,38 +31,52 @@ void L3FileWriter::write(const L3Record& r) {
 }
 
 void L3FileWriter::flush() {
-    if (!buf_.empty()) std::fwrite(buf_.data(), sizeof(L3Record), buf_.size(), f_);
+    if (!buf_.empty() && std::fwrite(buf_.data(), sizeof(L3Record), buf_.size(), f_) != buf_.size()) failed_ = true;
     buf_.clear();
 }
 
-L3FileWriter::~L3FileWriter() {
+void L3FileWriter::close() {
     if (!f_) return;
     flush();
     hdr_.count = count_;
-    std::fseek(f_, 0, SEEK_SET);
-    std::fwrite(&hdr_, sizeof(hdr_), 1, f_);
-    std::fclose(f_);
+    if (std::fseek(f_, 0, SEEK_SET) != 0 || std::fwrite(&hdr_, sizeof(hdr_), 1, f_) != 1) failed_ = true;
+    if (std::fclose(f_) != 0) failed_ = true;
+    f_ = nullptr;
+    if (failed_) throw std::runtime_error("L3FileWriter: write failed (disk full?): " + path_);
+}
+
+L3FileWriter::~L3FileWriter() {
+    try {
+        close();
+    } catch (const std::exception&) {   // destructors must not throw; call close() to see errors
+    }
 }
 
 // ── reader ───────────────────────────────────────────────────────────────────
 
-L3FileReader::L3FileReader(const std::string& path) {
-    f_ = std::fopen(path.c_str(), "rb");
-    if (!f_) throw std::runtime_error("L3FileReader: cannot open " + path);
-    if (std::fread(&hdr_, sizeof(hdr_), 1, f_) != 1 || std::memcmp(hdr_.magic, "LOBSIML3", 8) != 0)
+L3FileReader::L3FileReader(const std::string& path) : in_(path) {
+    if (in_.read(&hdr_, sizeof(hdr_)) != sizeof(hdr_) || std::memcmp(hdr_.magic, "LOBSIML3", 8) != 0)
         throw std::runtime_error("L3FileReader: not an L3 file: " + path);
+    if (hdr_.version != 1)
+        throw std::runtime_error("L3FileReader: unsupported version " + std::to_string(hdr_.version) + ": " + path);
     buf_.resize(1 << 15);
-}
-
-L3FileReader::~L3FileReader() {
-    if (f_) std::fclose(f_);
 }
 
 const L3Record* L3FileReader::next() {
     if (pos_ == len_) {
-        len_ = std::fread(buf_.data(), sizeof(L3Record), buf_.size(), f_);
+        // fread fills the buffer except at end of file, so a leftover
+        // fraction of a record means a truncated file.
+        const size_t bytes = in_.read(buf_.data(), sizeof(L3Record) * buf_.size());
+        if (bytes % sizeof(L3Record) != 0) throw std::runtime_error("L3FileReader: truncated file: " + in_.path());
+        len_ = bytes / sizeof(L3Record);
         pos_ = 0;
-        if (len_ == 0) return nullptr;
+        if (len_ == 0) {
+            if (read_ != hdr_.count)
+                throw std::runtime_error("L3FileReader: expected " + std::to_string(hdr_.count) + " records, found " +
+                                         std::to_string(read_) + ": " + in_.path());
+            return nullptr;
+        }
+        read_ += len_;
     }
     return &buf_[pos_++];
 }
@@ -167,5 +182,6 @@ uint64_t convert_bitstamp_l3(const std::string& jsonl_path, const std::string& o
         }
         w.write(r);
     }
+    w.close();
     return w.count();
 }

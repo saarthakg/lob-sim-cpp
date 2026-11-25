@@ -2,6 +2,7 @@
 #include "bybit_parse.hpp"
 #include "market_event.hpp"
 #include "../core/types.hpp"
+#include "../util/input_file.hpp"
 #include <cstdio>
 #include <deque>
 #include <memory>
@@ -22,24 +23,6 @@ public:
     virtual bool has_trades() const = 0;
     // True if events carry order-level (L3) records.
     virtual bool has_l3() const { return false; }
-};
-
-// Reads text lines from a plain file, or transparently decompresses `.gz`
-// (gzip -dc) and `.zip` (unzip -p) through a pipe so multi-GB daily files
-// never need to be expanded on disk.
-class LineReader {
-public:
-    explicit LineReader(const std::string& path);
-    ~LineReader();
-    LineReader(const LineReader&) = delete;
-    LineReader& operator=(const LineReader&) = delete;
-
-    // Returns false at EOF. `line` excludes the trailing newline.
-    bool getline(std::string& line);
-
-private:
-    FILE* fp_   = nullptr;
-    bool  pipe_ = false;
 };
 
 // Fixed-point decimal parsing shared by the venue readers: "84475.90" →
@@ -93,8 +76,8 @@ private:
 
     Config cfg_;
     Instrument inst_;
-    std::unique_ptr<LineReader> book_;
-    std::unique_ptr<LineReader> trades_;
+    std::unique_ptr<InputFile> book_;
+    std::unique_ptr<InputFile> trades_;
     std::string line_;
 
     bool     have_book_  = false;
@@ -132,7 +115,7 @@ public:
     bool is_legacy() const { return legacy_; }
 
 private:
-    std::unique_ptr<LineReader> reader_;
+    std::unique_ptr<InputFile> reader_;
     Instrument  inst_;
     bool        legacy_ = false;
     std::string line_;

@@ -1,5 +1,6 @@
 #pragma once
 #include "l3_record.hpp"
+#include "../util/input_file.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -9,6 +10,7 @@
 // Compact binary order-level (L3) event file — the replay format for the L3
 // engine. Fixed 48-byte little-endian records after a small header, so a
 // replay is a sequential fread into a reusable buffer with no parsing.
+// Files may be gzipped (`.l3bin.gz`, about 5x smaller); readers stream them.
 // Record semantics: see l3_record.hpp.
 #pragma pack(push, 1)
 struct L3FileHeader {
@@ -27,9 +29,14 @@ public:
     ~L3FileWriter();
     void write(const L3Record& r);
     uint64_t count() const { return count_; }
+    // Flushes, patches the record count into the header and closes. Throws if
+    // any write failed. The destructor closes too, but cannot report errors.
+    void close();
 
 private:
+    std::string path_;
     FILE* f_ = nullptr;
+    bool failed_ = false;
     L3FileHeader hdr_{};
     uint64_t count_ = 0;
     std::vector<L3Record> buf_;
@@ -39,16 +46,16 @@ private:
 class L3FileReader {
 public:
     explicit L3FileReader(const std::string& path);
-    ~L3FileReader();
     const L3FileHeader& header() const { return hdr_; }
     // Returns a pointer to the next record, or nullptr at end of file.
     const L3Record* next();
 
 private:
-    FILE* f_ = nullptr;
+    InputFile in_;
     L3FileHeader hdr_{};
     std::vector<L3Record> buf_;
     size_t pos_ = 0, len_ = 0;
+    uint64_t read_ = 0;
 };
 
 // Converts a Bitstamp order-level capture (python/data/capture_bitstamp_l3.py:

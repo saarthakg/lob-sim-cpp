@@ -7,67 +7,6 @@
 #include <numeric>
 #include <stdexcept>
 
-// ── LineReader ───────────────────────────────────────────────────────────────
-
-static bool ends_with(const std::string& s, const std::string& suffix) {
-    return s.size() >= suffix.size() &&
-           s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
-static std::string shell_quote(const std::string& s) {
-    std::string out = "'";
-    for (char c : s) {
-        if (c == '\'') out += "'\\''";
-        else out += c;
-    }
-    return out + "'";
-}
-
-LineReader::LineReader(const std::string& path) {
-    if (ends_with(path, ".gz")) {
-        fp_   = ::popen(("gzip -dc " + shell_quote(path)).c_str(), "r");
-        pipe_ = true;
-    } else if (ends_with(path, ".zip")) {
-        fp_   = ::popen(("unzip -p " + shell_quote(path)).c_str(), "r");
-        pipe_ = true;
-    } else {
-        fp_ = std::fopen(path.c_str(), "r");
-    }
-    if (!fp_) throw std::runtime_error("LineReader: cannot open " + path);
-    // Probe that the file exists even when going through a pipe (popen
-    // succeeds regardless; the decompressor fails later).
-    if (pipe_) {
-        FILE* probe = std::fopen(path.c_str(), "r");
-        if (!probe) {
-            ::pclose(fp_);
-            fp_ = nullptr;
-            throw std::runtime_error("LineReader: cannot open " + path);
-        }
-        std::fclose(probe);
-    }
-}
-
-LineReader::~LineReader() {
-    if (!fp_) return;
-    if (pipe_) ::pclose(fp_);
-    else std::fclose(fp_);
-}
-
-bool LineReader::getline(std::string& line) {
-    line.clear();
-    char buf[1 << 16];
-    while (std::fgets(buf, sizeof(buf), fp_)) {
-        size_t n = std::strlen(buf);
-        if (n > 0 && buf[n - 1] == '\n') {
-            line.append(buf, n - 1);
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            return true;
-        }
-        line.append(buf, n);
-    }
-    return !line.empty();
-}
-
 // ── decimal ──────────────────────────────────────────────────────────────────
 
 int64_t decimal::parse_scaled(const char*& p) {
@@ -111,8 +50,8 @@ int64_t decimal::parse_scaled(const std::string& s) {
 // ── BybitHistoricalSource ────────────────────────────────────────────────────
 
 BybitHistoricalSource::BybitHistoricalSource(Config cfg) : cfg_(std::move(cfg)) {
-    book_ = std::make_unique<LineReader>(cfg_.book_path);
-    if (!cfg_.trades_path.empty()) trades_ = std::make_unique<LineReader>(cfg_.trades_path);
+    book_ = std::make_unique<InputFile>(cfg_.book_path);
+    if (!cfg_.trades_path.empty()) trades_ = std::make_unique<InputFile>(cfg_.trades_path);
 
     // Prime the book stream; the first message must be a snapshot.
     have_book_ = read_book(pend_book_);
@@ -221,7 +160,7 @@ static std::vector<std::string> split_csv(const std::string& line) {
 }
 
 NormalizedCsvSource::NormalizedCsvSource(const std::string& path) {
-    reader_ = std::make_unique<LineReader>(path);
+    reader_ = std::make_unique<InputFile>(path);
     inst_   = Instrument::legacy();
     std::string line;
     while (reader_->getline(line)) {
@@ -389,6 +328,6 @@ std::unique_ptr<EventSource> open_event_source(const std::string& path,
         if (u1 != std::string::npos && u2 != std::string::npos) c.symbol = base.substr(u1 + 1, u2 - u1 - 1);
         return std::make_unique<BybitHistoricalSource>(c);
     }
-    if (ends_with(path, ".l3bin")) return std::make_unique<L3EventSource>(path);
+    if (ends_with(path, ".l3bin") || ends_with(path, ".l3bin.gz")) return std::make_unique<L3EventSource>(path);
     return std::make_unique<NormalizedCsvSource>(path);
 }
