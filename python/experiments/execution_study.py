@@ -30,9 +30,13 @@ DATA = ROOT / "data" / "raw" / "bybit"
 OUT = ROOT / "results" / "execution"
 SIZES = {"BTCUSDT": 0.05, "ATOMUSDT": 100, "XLMUSDT": 1000, "ADAUSDT": 1000}   # per slice
 # name -> (lob_sim --algo, extra args). "pessimistic queue" re-runs Peg assuming
-# no cancellation ahead of us ever helps: a lower bound on passive fills.
+# no cancellation ahead of us ever helps; "prints only" drops the rule that the
+# opposite quote reaching our price fills us. Together: the lower bound on
+# passive fills this data allows.
 ALGOS = {"cross": ("cross", []), "join": ("join", []), "peg": ("peg", []), "smart": ("smart", []),
-         "peg, pessimistic queue": ("peg", ["--queue", "riskaverse"])}
+         "peg, pessimistic queue": ("peg", ["--queue", "riskaverse"]),
+         "peg, prints only": ("peg", ["--no-cross-fill"]),
+         "peg, pessimistic queue, prints only": ("peg", ["--queue", "riskaverse", "--no-cross-fill"])}
 SLICES, HORIZON_S, LATENCY_US = 5, 300, 5000
 
 
