@@ -4,16 +4,25 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 
 // ── decimal ──────────────────────────────────────────────────────────────────
 
 int64_t decimal::parse_scaled(const char*& p) {
+    // Magnitudes past the representable range (about 9.2e9 units) saturate:
+    // no venue value gets near it, and overflow would be undefined behaviour.
+    constexpr int64_t MAX_INT = std::numeric_limits<int64_t>::max() / SCALE - 1;
+    constexpr int64_t MAX_SCALED = MAX_INT * SCALE;
     bool neg = false;
     if (*p == '-') { neg = true; ++p; }
     int64_t ip = 0;
-    while (*p >= '0' && *p <= '9') ip = ip * 10 + (*p++ - '0');
+    while (*p >= '0' && *p <= '9') {
+        if (ip <= MAX_INT) ip = ip * 10 + (*p - '0');
+        ++p;
+    }
+    ip = std::min(ip, MAX_INT);
     int64_t frac = 0;
     int64_t mul  = SCALE;
     if (*p == '.') {
@@ -32,10 +41,14 @@ int64_t decimal::parse_scaled(const char*& p) {
         bool eneg = false;
         if (*p == '-') { eneg = true; ++p; } else if (*p == '+') ++p;
         int e = 0;
-        while (*p >= '0' && *p <= '9') e = e * 10 + (*p++ - '0');
+        while (*p >= '0' && *p <= '9') {
+            if (e < 1000) e = e * 10 + (*p - '0');
+            ++p;
+        }
         double v = (static_cast<double>(ip) + static_cast<double>(frac) / SCALE);
-        for (int i = 0; i < e; ++i) v = eneg ? v / 10.0 : v * 10.0;
-        int64_t r = static_cast<int64_t>(v * SCALE);
+        for (int i = 0; i < std::min(e, 40); ++i) v = eneg ? v / 10.0 : v * 10.0;
+        v = std::min(v * SCALE, static_cast<double>(MAX_SCALED));
+        int64_t r = static_cast<int64_t>(v);
         return neg ? -r : r;
     }
     int64_t r = ip * SCALE + frac;
@@ -120,7 +133,14 @@ bool BybitHistoricalSource::read_trade(RawTrade& out) {
 }
 
 bool BybitHistoricalSource::next(MarketEvent& ev) {
-    if (!have_book_ && !have_trade_) return false;
+    if (!have_book_ && !have_trade_) {
+        if (off_grid_ > 0 && !off_grid_warned_) {
+            std::fprintf(stderr, "warning: %s: %zu prices/sizes off the detected grid (tick %g, lot %g)\n",
+                         inst_.symbol.c_str(), off_grid_, inst_.tick_size, inst_.lot_size);
+            off_grid_warned_ = true;
+        }
+        return false;
+    }
 
     bool emit_trade = have_trade_ && (!have_book_ || pend_trade_.ts <= pend_book_.ts);
     if (emit_trade) {
@@ -129,6 +149,7 @@ bool BybitHistoricalSource::next(MarketEvent& ev) {
         ev.bids.clear();
         ev.asks.clear();
         ev.trade.aggressor = pend_trade_.aggressor;
+        off_grid_ += !grid_.on_grid({pend_trade_.px, pend_trade_.qty});
         ev.trade.price     = grid_.px(pend_trade_.px);
         ev.trade.qty       = grid_.qty(pend_trade_.qty);
         have_trade_ = read_trade(pend_trade_);
@@ -141,6 +162,8 @@ bool BybitHistoricalSource::next(MarketEvent& ev) {
     ev.asks.clear();
     for (auto& l : pend_book_.bids) ev.bids.push_back({grid_.px(l.px), grid_.qty(l.qty)});
     for (auto& l : pend_book_.asks) ev.asks.push_back({grid_.px(l.px), grid_.qty(l.qty)});
+    for (auto& l : pend_book_.bids) off_grid_ += !grid_.on_grid(l);
+    for (auto& l : pend_book_.asks) off_grid_ += !grid_.on_grid(l);
     have_book_ = read_book(pend_book_);
     return true;
 }

@@ -71,3 +71,20 @@ jobs:
         run: |
           if [ "${{ matrix.san }}" = "tsan" ]; then sudo sysctl vm.mmap_rnd_bits=28; fi
           ./build/lob_tests
+
+  fuzz:
+    name: linux-clang18-fuzz
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libssl-dev zlib1g-dev
+      - name: Configure
+        run: cmake -B build -G Ninja -DLOBSIM_FUZZ=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
+      - name: Build
+        run: cmake --build build -j --target fuzz_itch fuzz_bybit
+      - name: Fuzz each parser for 60 s
+        run: |
+          mkdir -p new_itch new_bybit
+          ./build/fuzz_itch  -max_total_time=60 -max_len=4096 new_itch  cpp/fuzz/corpus/itch
+          ./build/fuzz_bybit -max_total_time=60 -max_len=4096 new_bybit cpp/fuzz/corpus/bybit

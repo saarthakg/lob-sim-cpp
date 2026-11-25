@@ -17,8 +17,12 @@ const char* find_after(const char* hay, const char* needle, const char* end = nu
 
 int64_t parse_int(const char* p) {
     int64_t v = 0;
-    while (*p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
-    return v;
+    // Capped well above any millisecond timestamp, so callers can scale it.
+    while (*p >= '0' && *p <= '9') {
+        if (v < 1'000'000'000'000'000) v = v * 10 + (*p - '0');
+        ++p;
+    }
+    return std::min<int64_t>(v, 9'000'000'000'000'000);
 }
 
 // `[["px","qty"],["px","qty"],...]` starting at the first '['.
@@ -36,7 +40,7 @@ void parse_levels(const char* p, std::vector<RawLevel>& out) {
         const int64_t q = decimal::parse_scaled(p);
         if (*p == '"') ++p;
         if (*p == ']') ++p;
-        out.push_back({px, q});
+        if (px >= 0 && q >= 0) out.push_back({px, q});   // negative: not a venue message
         if (*p == ',') ++p;
     }
 }
@@ -73,8 +77,10 @@ size_t parse_trades(const char* s, std::vector<TradeMsg>& out) {
         if (const char* v = find_after(open, "\"v\":\"", close)) m.qty = decimal::parse_scaled(v);
         if (const char* pp = find_after(open, "\"p\":\"", close)) m.px = decimal::parse_scaled(pp);
         if (const char* r = find_after(open, "\"RPI\":", close)) m.rpi = (*r == 't' || *r == '1');
-        out.push_back(m);
-        ++n;
+        if (m.px >= 0 && m.qty >= 0) {
+            out.push_back(m);
+            ++n;
+        }
         p = close + 1;
         if (*p != ',') break;
     }

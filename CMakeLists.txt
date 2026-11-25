@@ -84,3 +84,15 @@ target_link_libraries(lob_bench PRIVATE lob_core)
 
 add_executable(lob_bench_l3 cpp/bench/bench_l3.cpp)
 target_link_libraries(lob_bench_l3 PRIVATE lob_core)
+
+# ── fuzz targets (Clang + libFuzzer) ──────────────────────────────────────────
+option(LOBSIM_FUZZ "Build libFuzzer targets" OFF)
+if(LOBSIM_FUZZ)
+  foreach(target fuzz_itch fuzz_bybit)
+    add_executable(${target} cpp/fuzz/${target}.cpp ${LOB_CORE_SRCS})
+    target_include_directories(${target} PRIVATE cpp/include)
+    target_link_libraries(${target} PRIVATE nlohmann_json::nlohmann_json)
+    target_compile_options(${target} PRIVATE -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined)
+    target_link_options(${target} PRIVATE -fsanitize=fuzzer,address,undefined)
+  endforeach()
+endif()

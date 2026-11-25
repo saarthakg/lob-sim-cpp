@@ -70,6 +70,10 @@ public:
 
     size_t book_messages() const { return book_msgs_; }
     size_t trade_prints()  const { return trade_msgs_; }
+    // Values that were not whole multiples of the detected tick / lot (and were
+    // rounded). Non-zero means the grid was detected too coarse: pass
+    // --tick-size / --lot-size. Also warned about on stderr at end of data.
+    size_t off_grid() const { return off_grid_; }
 
 private:
     struct RawTrade { Timestamp ts; Side aggressor; int64_t px; int64_t qty; };
@@ -85,7 +89,8 @@ private:
     bybit::BookMsg pend_book_;
     RawTrade pend_trade_{};
     bybit::Grid grid_;
-    size_t   book_msgs_ = 0, trade_msgs_ = 0;
+    size_t   book_msgs_ = 0, trade_msgs_ = 0, off_grid_ = 0;
+    bool     off_grid_warned_ = false;
 
     bool read_book(bybit::BookMsg& out);
     bool read_trade(RawTrade& out);

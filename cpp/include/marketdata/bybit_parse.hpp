@@ -39,8 +39,14 @@ size_t parse_trades(const char* msg, std::vector<TradeMsg>& out);
 struct Grid {
     int64_t tick_scaled = 0;
     int64_t lot_scaled  = 0;
-    Price px(int64_t scaled) const { return (scaled + tick_scaled / 2) / tick_scaled; }
-    Qty   qty(int64_t scaled) const { return (scaled + lot_scaled / 2) / lot_scaled; }
+    Price px(int64_t scaled) const { return round_div(scaled, tick_scaled); }
+    Qty   qty(int64_t scaled) const { return round_div(scaled, lot_scaled); }
+    // Nearest multiple, halves up, for scaled >= 0 — without the overflow of
+    // (scaled + unit / 2) near the top of the range.
+    static int64_t round_div(int64_t scaled, int64_t unit) {
+        return scaled / unit + (scaled % unit >= unit - unit / 2 ? 1 : 0);
+    }
+    bool on_grid(const RawLevel& l) const { return l.px % tick_scaled == 0 && l.qty % lot_scaled == 0; }
 };
 // tick/lot <= 0: detect from the snapshot as the GCD of price differences and
 // of sizes (prices print more decimals than the real tick, e.g. "84475.90").
