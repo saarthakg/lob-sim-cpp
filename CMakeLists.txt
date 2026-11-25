@@ -46,7 +46,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(ixwebsocket)
 
 # ── lob_core library ──────────────────────────────────────────────────────────
-file(GLOB_RECURSE LOB_CORE_SRCS
+file(GLOB_RECURSE LOB_CORE_SRCS CONFIGURE_DEPENDS
   "cpp/src/core/*.cpp"
   "cpp/src/marketdata/*.cpp"
   "cpp/src/sim/*.cpp"
@@ -58,7 +58,7 @@ target_include_directories(lob_core PUBLIC cpp/include)
 target_link_libraries(lob_core PUBLIC nlohmann_json::nlohmann_json)
 
 # ── lob_live: real-time market data (networking kept out of lob_core) ─────────
-file(GLOB LOB_LIVE_SRCS "cpp/src/live/*.cpp")
+file(GLOB LOB_LIVE_SRCS CONFIGURE_DEPENDS "cpp/src/live/*.cpp")
 add_library(lob_live STATIC ${LOB_LIVE_SRCS})
 target_link_libraries(lob_live PUBLIC lob_core ixwebsocket)
 
@@ -67,7 +67,7 @@ add_executable(lob_sim cpp/app/main.cpp)
 target_link_libraries(lob_sim PRIVATE lob_live)
 
 # ── lob_tests executable ─────────────────────────────────────────────────────
-file(GLOB TEST_SRCS "cpp/tests/*.cpp")
+file(GLOB TEST_SRCS CONFIGURE_DEPENDS "cpp/tests/*.cpp")
 add_executable(lob_tests ${TEST_SRCS})
 target_link_libraries(lob_tests PRIVATE lob_core Catch2::Catch2WithMain)
 # Catch2's TEST_CASE uses __COUNTER__, which newer Clang flags under -Wpedantic.
