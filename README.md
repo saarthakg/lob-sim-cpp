@@ -6,13 +6,14 @@ A **C++ limit-order-book engine and market-making research platform**:
 event-driven replay of full exchange order books, a matching simulator with an
 explicit queue-position model and three latency channels, literature-based
 market-making strategies, and a research workflow built so it can't fool
-itself. It runs entirely on **free public data**.
+itself. It runs entirely on **free public data**: Bybit perpetuals, Bitstamp, and
+Nasdaq's full order feed.
 
 | | |
 |---|---|
 | **Speed** | Order-level (L3) book at **50M msgs/s, 18 ns p50 / 46 ns p99 per operation**, 5× a `std::map`/`std::list` book. A **full Nasdaq ITCH 5.0 day** (268.7M messages, 8,892 symbols) rebuilds every order book in 22 s of compute. **Live tick-to-trade of 8.2 µs p50 / 22 µs p99** on Bybit's real-time feed (WebSocket thread → lock-free ring → engine). |
-| **Fidelity** | On order-level data, our simulated orders sit in the **real FIFO queue**. Against independent L3 ground truth the exact-queue exchange matches real fills with 0.996 accuracy and 1.000 precision. On L2-only data, a queue model is used instead; it is calibrated against the same ground truth (fill rates within 3%). Feed, order-entry and response latency are modelled separately, so stale quotes really do get picked off. |
-| **Rigour** | Walk-forward parameter selection; 16 out-of-sample days; sensitivity sweeps over latency, queue model and fill rule; and a **pre-registered** confirmation test on 30 untouched days. CI on GCC, Clang and AppleClang, with ASan/UBSan and TSan jobs. |
+| **Fidelity** | On order-level data, simulated orders sit in the **real FIFO queue**: against 19,034 real Nasdaq orders, **0 impossible and 0 missed fills**, and 0.996 accuracy against independent Bitstamp ground truth. On L2-only data a queue model is used instead, and its errors are measured on the same orders (9.8% of fills jump a queue that stayed put). Feed, order-entry and response latency are modelled separately, so stale quotes really do get picked off. |
+| **Rigour** | Walk-forward parameter selection; 16 out-of-sample days; sensitivity sweeps over latency, queue model and fill rule; and two **pre-registered** confirmation tests (30 untouched Bybit days, 8 Nasdaq days from 2025-26). CI on GCC, Clang and AppleClang, with ASan/UBSan, TSan and fuzzing jobs. |
 
 **What the platform found** ([Results](#results)):
 
@@ -31,6 +32,11 @@ itself. It runs entirely on **free public data**.
   outweighs the spread captured at every fee tier tested, including a maker
   rebate. The platform quantifies the gap: how much edge, how fast a reaction
   and what fee tier it would take.
+- **On Nasdaq, the top maker rebate roughly equals adverse selection.** With
+  exact queue priority and zero latency, joining the touch nets about 0 c/share
+  after the 0.30 c rebate in both 2019-21 and pre-registered 2025-26 data, and
+  loses more with every step of latency. Of five pre-registered predictions two
+  were confirmed, and the misses are reported as misses.
 - **A promising pattern failed its pre-registered test.** This is exactly
   the kind of false positive the workflow is built to catch.
 
@@ -641,7 +647,60 @@ fitted. 5 ms each-way latency, VIP0 fees
 This is the one robustly positive, actionable result here: **use limit orders
 to *execute*, not to make markets**.
 
-### 4. What it would take
+### 4. Nasdaq market making with exact queue priority
+
+The Bybit study has three caveats: a 100 ms book, a modelled queue and an
+assumed rebate. Nasdaq's order-level feed removes all three. The same
+strategies run on 14 stocks with their orders in the real FIFO, microsecond
+latency, Nasdaq's published per-share fees, and end-of-day flattening.
+
+- **Development:** 10 days, 2019-01 to 2021-08, 24 ladder parameter sets plus a
+  touch-joining control ([DEV_GRID.md](results/nasdaq/DEV_GRID.md)).
+- **Confirmation:** 8 days, 2025-12 to 2026-06, downloaded only after
+  [five hypotheses and their thresholds](results/nasdaq/PREREGISTRATION.md)
+  were committed and pushed ([CONFIRMATION.md](results/nasdaq/CONFIRMATION.md)).
+
+| | Prediction | Result (8 days) | t | Verdict (threshold t = 3.0) |
+|---|---|---|---|---|
+| H1 | Touch-joining loses even at the top rebate, 50 µs | loses on 7 of 8 days | -2.20 | not supported |
+| H2 | The best ladder makes money at the top rebate | loses on 8 of 8 days | -2.03 | not supported (as expected) |
+| H3 | Gating on imbalance makes fills *more* adverse | -0.24 c/share, 8 of 8 days | -4.84 | **supported** |
+| H4 | 10 µs beats 10 ms | +0.53 c/share, 8 of 8 days | +2.69 | not supported |
+| H5 | Touch-joining is near zero-profit at 0 µs | +0.004 c/share, band ±0.10 | - | **supported** |
+
+![Nasdaq latency curve](docs/plots/nasdaq_latency.png)
+
+- **The rebate prices adverse selection.** With no latency at all, joining the
+  touch loses 0.30-0.33 c/share before rebates in both periods, and Nasdaq's
+  top rebate is 0.30. That is the Glosten-Milgrom zero-profit condition, read
+  off real order flow.
+- **Latency is the rest of the story.** The loss grows at every step from 0 to
+  10 ms in both periods. H4 had the predicted sign every day, but two very
+  large days inflate the variance and it misses its threshold, so it counts as
+  unconfirmed.
+- **Filtering on imbalance backfires,** which is the one effect that clears its
+  bar. A likely reason: it joins long queues at the back and gives up priority
+  to cancel, so it fills mostly when a level is swept.
+- **A seven-in-eight loss is not a confirmed loss.** One day (2026-06-12) made
+  +$13.9k and one (2026-05-18) lost $90.2k.
+
+**The dollar figures are not credible, and the README does not quote a profit
+or loss from them.** A [post-hoc check](results/nasdaq/PARTICIPATION.md) found
+the touch-joining control trades 21% of Nasdaq's printed volume on the
+confirmation days (47% in QQQ), which no real participant could do without
+moving the market. H5 is also volume-weighted, and 57% of its weight is QQQ and
+NVDA. By symbol the same number ranges from -0.51 (MU) to +0.10, with a median
+of -0.05 and 10 of 14 within ±0.10. Zero latency is a limit, not a setting
+anyone can buy.
+
+```bash
+python python/data/fetch_itch.py                                 # streams 18 days (~150 GB of traffic, ~5 GB kept)
+python python/experiments/nasdaq_study.py --stage dev
+python python/experiments/nasdaq_study.py --stage confirm
+python python/experiments/nasdaq_participation.py && python python/experiments/nasdaq_plots.py
+```
+
+### 5. What it would take
 
 Reading the break-even column together with the sensitivity runs, a passive
 market maker on these contracts needs **at least one** of the following, by a
@@ -678,12 +737,14 @@ The original simulator's headline numbers were artifacts. In order of impact:
 
 ## Limitations
 
-- **Fifty days, one market regime.** That is 8 selection/test days, 12
+- **On Bybit, fifty days and one market regime.** That is 8 selection/test days, 12
   pooled out-of-sample days and 30 confirmation days, all from August to
   October 2026. It is enough to reject the strategies here, but it is not a
   claim about every market regime.
 - **No market impact.** Our orders never move the replayed book. That is
-  valid at a few hundred dollars per order.
+  reasonable at a few hundred dollars per order on Bybit. It is *not* reasonable
+  for the Nasdaq touch-joining control, which reaches 21% of volume
+  ([PARTICIPATION.md](results/nasdaq/PARTICIPATION.md)).
 - **On Bybit, the 100 ms book is a hard floor** on how fast a simulated strategy
   can see cancellations. (The Nasdaq study has no such floor.) Results are pessimistic for a truly low-latency participant,
   and the no-cross-fill bracket bounds that.
@@ -711,7 +772,7 @@ python/analysis        signal_research.py, l3_ground_truth.py, queue_model_valid
                        itch_clone_validation.py, run_report.py
 python/experiments     run_backtests.py, study.py, summarize_study.py, extra_oos.py, confirm.py, l2_vs_l3.py,
                        execution_study.py, nasdaq_study.py, nasdaq_confirm.py, nasdaq_plots.py
-results/               study tables, fitted signals, taker/execution, queue validation, L2-vs-L3,
+results/               study tables, fitted signals, taker/execution, Nasdaq study, queue validation, L2-vs-L3,
                        live latency sessions, ITCH replay, pre-registration + confirmation
 cpp/fuzz               libFuzzer targets for the ITCH and Bybit parsers
 .github/workflows      CI: GCC/Clang/AppleClang builds + tests, ASan/UBSan, TSan, fuzzing
