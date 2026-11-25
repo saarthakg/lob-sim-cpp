@@ -87,6 +87,10 @@ Exchange model
   --queue-power N                   exponent for --queue power (default 2)
   --exchange-model auto|l2|l3       auto: exact-queue L3 exchange on order-level
                                     data (.l3bin), queue-model L2 exchange otherwise
+  --impact none|displace            L3 only. displace: shares we take no longer also
+                                    fill the real maker; its size stays in the queue
+  --impact-ttl-ms N                 lifetime of displaced size whose owner is gone
+                                    (default 0 = until traded)
   --no-cross-fill                   don't fill on the book crossing our price
                                     (only trade prints fill; ignored without trades)
 
@@ -154,7 +158,7 @@ static const std::set<std::string> kOptions = {
     "--minutes", "--depth", "--tick-size", "--lot-size", "--output", "--sample-ms",
     // exchange and latency
     "--maker-fee-bps", "--taker-fee-bps", "--maker-fee-per-unit", "--taker-fee-per-unit", "--session-start",
-    "--session-end", "--queue", "--queue-power", "--exchange-model", "--latency-us",
+    "--session-end", "--queue", "--queue-power", "--exchange-model", "--impact", "--impact-ttl-ms", "--latency-us",
     "--feed-latency-us", "--entry-latency-us", "--response-latency-us", "--jitter",
     // strategy
     "--strategy", "--order-size", "--max-position", "--gamma", "--levels", "--half-spread-mult", "--skew-mult",
@@ -437,6 +441,8 @@ static int run_replay(EventSource& src, const Args& a) {
     cfg.exchange.queue.kind = choose<QueueModel::Kind>(a, "--queue", "power",
         {{"riskaverse", QueueModel::Kind::RiskAverse}, {"log", QueueModel::Kind::ProbLog}, {"power", QueueModel::Kind::ProbPower}});
     cfg.exchange.queue.power  = a.num("--queue-power", 2.0);
+    cfg.exchange.displace_volume = choose<bool>(a, "--impact", "none", {{"none", false}, {"displace", true}});
+    cfg.exchange.displaced_ttl_us = static_cast<int64_t>(a.num("--impact-ttl-ms", 0) * 1000);
     cfg.exchange.fill_on_cross = !a.has("--no-cross-fill");
     cfg.exchange_model = choose<ExchangeModel>(a, "--exchange-model", "auto",
         {{"auto", ExchangeModel::Auto}, {"l2", ExchangeModel::L2Queue}, {"l3", ExchangeModel::L3Exact}});

@@ -503,8 +503,8 @@ What the table shows:
   losses fall from -$480/day (naive) to -$65/day (ladder) at VIP0, but volume
   falls 86% too, and gross PnL per dollar is unchanged (-1.83 vs -1.79 bp). Over
   all 21 symbol x strategy x fee cells, edge at the fill rises in every one;
-  gross bp improves in 11, clearly so only for BTCUSDT and XLMUSDT, and gets worse for
-  the ADA ladder (-1.77 to -3.01) and most ATOM GLFT cells. An earlier version
+  gross bp improves in 11, mainly for BTCUSDT and the XLM ladder, and it gets worse
+  for the ADA ladder (-1.77 to -3.01) and every ATOM GLFT cell. An earlier version
   of this README presented the smaller dollar losses as the research features
   paying off.
 - **None of it beats adverse selection.** Within 5 seconds the mid moves

@@ -40,6 +40,17 @@ struct ExchangeConfig {
     // has moved *through* is filled even without a matching trade print —
     // the only fill evidence available when no trade feed is loaded.
     bool fill_on_cross = true;
+    // L3 exchange only. Off: a print that fills us also fills the real maker it
+    // names (no impact: the same share trades twice). On: the shares we take
+    // stay in that maker's queue position as resting size, ahead of everything
+    // that joined later, and absorb later flow before we or anyone behind can.
+    // Every printed share then trades exactly once, so our volume is bounded
+    // by the market's and our presence costs us queue position.
+    bool displace_volume = false;
+    // How long fully displaced size (its real owner is gone from the feed) stays
+    // resting. Real resting orders are often cancelled quickly, so 0 = never
+    // expires is the pessimistic end of the bracket.
+    int64_t displaced_ttl_us = 0;
 };
 
 // Simulated matching engine for *our* orders against a replayed market.

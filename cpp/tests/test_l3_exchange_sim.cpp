@@ -14,7 +14,8 @@ Instrument inst() {
 // Drives an L3ExchangeSim and a matching market-only L2 book together, the
 // way L3EventSource + Backtester would.
 struct Rig {
-    L3ExchangeSim ex{inst(), ExchangeConfig{}};
+    L3ExchangeSim ex;
+    explicit Rig(ExchangeConfig cfg = {}) : ex(inst(), cfg) {}
     OrderBook l2;
     Portfolio pf{inst()};
     std::vector<ExecutionReport> out;
@@ -164,4 +165,104 @@ TEST_CASE("Per-unit fees: a maker rebate in quote currency per base unit", "[l3e
     f.maker_per_unit = -0.002; f.taker_per_unit = 0.003;
     REQUIRE(f.maker_fee(1'000'000.0, 100) == -0.2);
     REQUIRE(f.taker_fee(1'000'000.0, 100) == 0.3);
+}
+
+namespace {
+
+ExchangeConfig displacing(int64_t ttl = 0) {
+    ExchangeConfig c;
+    c.displace_volume = true;
+    c.displaced_ttl_us = ttl;
+    return c;
+}
+
+}  // namespace
+
+TEST_CASE("Displacement: shares we take stay in the real maker's queue slot and trade before our next order", "[l3ex][impact]") {
+    Rig g(displacing());
+    g.push(L3Type::Add, 9, Side::Ask, 102, 500);
+    g.order(1, Side::Bid, 100, 30);
+    g.push(L3Type::Add, 1, Side::Bid, 100, 30);       // real order behind us
+    g.push(L3Type::Trade, 1, Side::Ask, 100, 30);     // the feed says it filled completely
+    g.push(L3Type::Delete, 1, Side::Bid, 100, 0);
+    REQUIRE(g.filled() == 30);                        // but we were ahead: we got the print
+    REQUIRE(g.ex.phantom_orders() == 1);              // and the maker still rests
+    g.order(2, Side::Bid, 100, 30);
+    REQUIRE(g.ex.queue_ahead(2) == 30);               // ahead of our next order
+    g.push(L3Type::Add, 2, Side::Bid, 100, 50);
+    g.push(L3Type::Trade, 2, Side::Ask, 100, 50);     // 30 to the displaced size, 20 to us
+    REQUIRE(g.filled() == 50);
+    REQUIRE(g.ex.displaced_absorbed() == 30);
+    REQUIRE(g.ex.phantom_orders() == 0);
+}
+
+TEST_CASE("Displacement off is the original rule: the next order is at the front at once", "[l3ex][impact]") {
+    Rig g;
+    g.push(L3Type::Add, 9, Side::Ask, 102, 500);
+    g.order(1, Side::Bid, 100, 30);
+    g.push(L3Type::Add, 1, Side::Bid, 100, 30);
+    g.push(L3Type::Trade, 1, Side::Ask, 100, 30);
+    g.push(L3Type::Delete, 1, Side::Bid, 100, 0);
+    g.order(2, Side::Bid, 100, 30);
+    REQUIRE(g.ex.queue_ahead(2) == 0);
+    REQUIRE(g.ex.phantom_orders() == 0);
+}
+
+TEST_CASE("Displacement: partial fills defer, and a later cancel takes the deferred shares with it", "[l3ex][impact]") {
+    Rig g(displacing());
+    g.push(L3Type::Add, 9, Side::Ask, 102, 500);
+    g.order(1, Side::Bid, 100, 10);
+    g.push(L3Type::Add, 1, Side::Bid, 100, 100);
+    g.push(L3Type::Trade, 1, Side::Ask, 100, 40);     // we take 10 of 40
+    g.push(L3Type::Modify, 1, Side::Bid, 100, 60);    // feed: 60 left; our world: 70
+    REQUIRE(g.ex.book().find(1)->qty == 70);
+    g.order(2, Side::Bid, 100, 10);
+    REQUIRE(g.ex.queue_ahead(2) == 70);
+    g.push(L3Type::Delete, 1, Side::Bid, 100, 0);     // not preceded by a print: a cancel
+    REQUIRE(g.ex.queue_ahead(2) == 0);
+    REQUIRE(g.ex.phantom_orders() == 0);
+}
+
+TEST_CASE("Displacement: displaced size expires after its time to live", "[l3ex][impact]") {
+    Rig g(displacing(1000));
+    g.push(L3Type::Add, 9, Side::Ask, 102, 500);
+    g.order(1, Side::Bid, 100, 30);
+    g.push(L3Type::Add, 1, Side::Bid, 100, 30, 10);
+    g.push(L3Type::Trade, 1, Side::Ask, 100, 30, 20);
+    g.push(L3Type::Delete, 1, Side::Bid, 100, 0, 20);
+    g.order(2, Side::Bid, 100, 30);
+    REQUIRE(g.ex.queue_ahead(2) == 30);
+    g.push(L3Type::Add, 3, Side::Bid, 90, 1, 1020);
+    REQUIRE(g.ex.queue_ahead(2) == 0);
+}
+
+TEST_CASE("Displacement: an incoming order that crosses us rests only what is left of it", "[l3ex][impact]") {
+    Rig g(displacing());
+    g.push(L3Type::Add, 1, Side::Bid, 99, 10);
+    g.push(L3Type::Add, 9, Side::Ask, 105, 500);
+    g.order(1, Side::Bid, 100, 30);
+    g.push(L3Type::Add, 2, Side::Ask, 100, 50);       // only rested because we were not there
+    REQUIRE(g.filled() == 30);
+    REQUIRE(g.ex.book().find(2)->qty == 20);
+    g.push(L3Type::Modify, 2, Side::Ask, 100, 40);    // feed still thinks it has more
+    REQUIRE(g.ex.book().find(2)->qty == 20);
+}
+
+TEST_CASE("Displacement: we never take more from prints than the market printed", "[l3ex][impact]") {
+    Rig g(displacing());
+    g.push(L3Type::Add, 1'000'000, Side::Ask, 102, 500);
+    Qty printed = 0;
+    OrderId next = 1;
+    uint64_t real = 1;
+    for (int i = 0; i < 400; ++i) {
+        g.order(next++, Side::Bid, 100, 10);
+        g.push(L3Type::Add, real, Side::Bid, 100, 7, i);
+        g.push(L3Type::Trade, real, Side::Ask, 100, 7, i);
+        g.push(L3Type::Delete, real, Side::Bid, 100, 0, i);
+        ++real;
+        printed += 7;
+    }
+    REQUIRE(g.ex.our_print_volume() + g.ex.displaced_absorbed() <= printed);
+    REQUIRE(g.ex.our_print_volume() > 0);
+    REQUIRE(g.filled() <= printed);
 }
