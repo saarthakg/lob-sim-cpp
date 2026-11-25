@@ -45,7 +45,7 @@ def latency():
         ax.text(len(lats) - 0.9, level + 0.008, text, ha="right", va="bottom", fontsize=8.5, color=MUTED)
     ax.set_xticks(range(len(lats)))
     ax.set_xticklabels([f"{l:,} µs" if l < 1000 else f"{l // 1000} ms" for l in lats])
-    ax.set_ylim(-0.62, 0.0)
+    ax.set_ylim(-0.85, 0.0)
     ax.grid(axis="y", color=GRID, lw=0.8)
     ax.set_xlabel("each-way latency", color=MUTED, fontsize=9)
     ax.set_ylabel("cents per share, before rebates", color=MUTED, fontsize=9)
