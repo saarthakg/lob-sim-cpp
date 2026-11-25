@@ -22,7 +22,7 @@ jobs:
             cc: clang-18
             cxx: clang++-18
           - name: macos-appleclang
-            os: macos-14
+            os: macos-15
             cc: clang
             cxx: clang++
     steps:
