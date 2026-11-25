@@ -1,6 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include "../include/marketdata/itch_book_builder.hpp"
 
+#include <algorithm>
+#include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -89,4 +92,62 @@ TEST_CASE("ITCH price map is exact and order-preserving across $1", "[itch]") {
     REQUIRE(ItchBookBuilder::to_ticks(9999) < ItchBookBuilder::to_ticks(10000));
     REQUIRE(ItchBookBuilder::to_ticks(10000) + 1 == ItchBookBuilder::to_ticks(10100));
     for (uint32_t p : {1u, 9999u, 10000u, 123400u, 99999900u}) REQUIRE(ItchBookBuilder::to_usd(ItchBookBuilder::to_ticks(p)) * 1e4 == p);
+}
+
+TEST_CASE("ITCH 5.0: messages shorter than their spec length are counted, never decoded", "[itch]") {
+    Writer w;
+    w.directory(7, "AAPL");
+    const std::vector<uint8_t> good = w.buf;
+    // Zero-length frame, a 1-byte 'D', and an add cut off before its price.
+    std::vector<uint8_t> buf = {0, 0, 0, 1, 'D'};
+    w.buf.clear();
+    w.add(7, 1, 'B', 100, 1500000);
+    buf.push_back(0);
+    buf.push_back(30);
+    buf.insert(buf.end(), w.buf.begin() + 2, w.buf.begin() + 32);
+    buf.insert(buf.end(), good.begin(), good.end());   // the stream resynchronises
+    // Copy to an exactly-sized heap block so ASan sees any overread.
+    std::unique_ptr<uint8_t[]> exact(new uint8_t[buf.size()]);
+    std::copy(buf.begin(), buf.end(), exact.get());
+
+    ItchBookBuilder b;
+    REQUIRE(itch::parse_itch(exact.get(), buf.size(), b) == buf.size());
+    REQUIRE(b.stats().malformed == 3);
+    REQUIRE(b.stats().adds == 0);
+    REQUIRE(b.symbol(7) == "AAPL");
+}
+
+TEST_CASE("ITCH 5.0: random and bit-flipped streams never read out of bounds or corrupt the book", "[itch][fuzz]") {
+    std::mt19937_64 rng(1);
+    for (int trial = 0; trial < 200; ++trial) {
+        Writer w;
+        w.directory(1, "X");
+        for (uint64_t i = 1; i < 60; ++i) {
+            w.add(1, i, rng() % 2 ? 'B' : 'S', 1 + static_cast<uint32_t>(rng() % 500), 100000 + 100 * static_cast<uint32_t>(rng() % 50));
+            if (rng() % 3 == 0) w.execute(1, 1 + rng() % i, 10);
+            if (rng() % 3 == 0) w.cancel(1, 1 + rng() % i, 10);
+            if (rng() % 4 == 0) w.del(1, 1 + rng() % i);
+            if (rng() % 4 == 0) w.replace(1, 1 + rng() % i, 1000 + i, 77, 100000);
+        }
+        for (int k = 0; k < 40; ++k) w.buf[rng() % w.buf.size()] = static_cast<uint8_t>(rng());
+        std::unique_ptr<uint8_t[]> exact(new uint8_t[w.buf.size()]);
+        std::copy(w.buf.begin(), w.buf.end(), exact.get());
+        ItchBookBuilder b;
+        REQUIRE(itch::parse_itch(exact.get(), w.buf.size(), b) <= w.buf.size());
+        // Aggregates stay consistent with the orders they summarise.
+        for (int loc = 0; loc < 4; ++loc) {
+            const L3Book* bk = b.book(static_cast<uint16_t>(loc));
+            if (!bk) continue;
+            for (Side s : {Side::Bid, Side::Ask}) {
+                std::vector<Level> lv;
+                bk->top_levels(s, 1000, lv);
+                for (const Level& l : lv) {
+                    Qty sum = 0;
+                    bk->for_each_in_level(s, l.price, [&](const L3Book::Order& o) { sum += o.qty; });
+                    REQUIRE(sum == l.qty);
+                    REQUIRE(sum > 0);
+                }
+            }
+        }
+    }
 }

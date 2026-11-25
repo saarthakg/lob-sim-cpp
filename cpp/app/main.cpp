@@ -453,11 +453,12 @@ static int run_replay_l3(const std::string& path) {
 
 namespace {
 // Wraps ItchBookBuilder to print chosen symbols' books at a time of day.
-struct ItchSnapshotter {
+struct ItchSnapshotter : itch::HandlerBase {
     ItchBookBuilder& b;
-    uint64_t at_ns;
+    uint64_t at_ns = 0;
     std::vector<std::string> symbols;
     bool done = false;
+    explicit ItchSnapshotter(ItchBookBuilder& bb) : b(bb) {}
 
     void maybe(uint64_t ts) {
         if (done || at_ns == 0 || ts < at_ns) return;
@@ -488,18 +489,20 @@ struct ItchSnapshotter {
     }
     void on_add(uint16_t l, uint64_t ts, uint64_t r, uint8_t s, uint32_t q, uint32_t p) { maybe(ts); b.on_add(l, ts, r, s, q, p); }
     void on_execute(uint16_t l, uint64_t ts, uint64_t r, uint32_t q) { b.on_execute(l, ts, r, q); }
+    void on_execute_with_price(uint16_t l, uint64_t ts, uint64_t r, uint32_t q, bool pr, uint32_t px) { b.on_execute_with_price(l, ts, r, q, pr, px); }
     void on_cancel(uint16_t l, uint64_t ts, uint64_t r, uint32_t q) { b.on_cancel(l, ts, r, q); }
     void on_delete(uint16_t l, uint64_t ts, uint64_t r) { b.on_delete(l, ts, r); }
     void on_replace(uint16_t l, uint64_t ts, uint64_t o, uint64_t n, uint32_t q, uint32_t p) { b.on_replace(l, ts, o, n, q, p); }
     void on_directory(uint16_t l, const char* s) { b.on_directory(l, s); }
     void on_hidden_trade(uint16_t l, uint64_t ts, uint32_t q, uint32_t p) { b.on_hidden_trade(l, ts, q, p); }
     void on_message(uint8_t t) { b.on_message(t); }
+    void on_malformed(uint8_t t) { b.on_malformed(t); }
 };
 }  // namespace
 
 static int run_replay_itch(const std::string& path, const Args& a) {
     ItchBookBuilder builder;
-    ItchSnapshotter snap{builder, 0, {}};
+    ItchSnapshotter snap(builder);
     if (a.has("--snapshot-time")) {
         unsigned h = 0, m = 0, sec = 0;
         std::sscanf(a.str("--snapshot-time").c_str(), "%u:%u:%u", &h, &m, &sec);
@@ -549,9 +552,11 @@ static int run_replay_itch(const std::string& path, const Args& a) {
                 (unsigned long long)s.adds, (unsigned long long)s.executes, (unsigned long long)s.cancels,
                 (unsigned long long)s.deletes, (unsigned long long)s.replaces, (unsigned long long)s.hidden_trades);
     std::printf("  books: %zu symbols, %zu orders resting at end of feed\n", builder.book_count(), builder.resting_orders());
-    std::printf("  consistency: unknown refs %llu, duplicate adds %llu, over-executions %llu, sub-penny prices >= $1 %llu\n",
+    std::printf("  consistency: unknown refs %llu, duplicate adds %llu, over-executions %llu, sub-penny prices >= $1 %llu, "
+                "malformed %llu, trailing bytes %zu\n",
                 (unsigned long long)s.unknown_ref, (unsigned long long)s.duplicate_add,
-                (unsigned long long)s.over_execute, (unsigned long long)s.subpenny_violations);
+                (unsigned long long)s.over_execute, (unsigned long long)s.subpenny_violations,
+                (unsigned long long)s.malformed, have);
     return 0;
 }
 

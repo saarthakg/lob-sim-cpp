@@ -19,7 +19,7 @@
 // memory. A sub-penny price >= $1 (illegal, so never expected) is counted.
 // The rule depends on the *order's* price, not the stock's: a $0.0001 stub
 // bid on a $12 stock is legal and exact.
-class ItchBookBuilder {
+class ItchBookBuilder : public itch::HandlerBase {
 public:
     struct Stats {
         uint64_t messages = 0, adds = 0, executes = 0, cancels = 0, deletes = 0, replaces = 0, hidden_trades = 0;
@@ -27,6 +27,7 @@ public:
         uint64_t duplicate_add = 0;
         uint64_t over_execute = 0;       // executed/cancelled more shares than resting
         uint64_t subpenny_violations = 0;   // sub-penny price >= $1
+        uint64_t malformed = 0;             // shorter than the spec's length for its type
         std::array<uint64_t, 256> by_type{};
     };
 
@@ -35,6 +36,9 @@ public:
     // itch::parse_itch handler interface
     void on_add(uint16_t loc, uint64_t ts, uint64_t ref, uint8_t side, uint32_t shares, uint32_t price);
     void on_execute(uint16_t loc, uint64_t ts, uint64_t ref, uint32_t shares);
+    void on_execute_with_price(uint16_t loc, uint64_t ts, uint64_t ref, uint32_t shares, bool, uint32_t) {
+        on_execute(loc, ts, ref, shares);
+    }
     void on_cancel(uint16_t loc, uint64_t ts, uint64_t ref, uint32_t shares);
     void on_delete(uint16_t loc, uint64_t ts, uint64_t ref);
     void on_replace(uint16_t loc, uint64_t ts, uint64_t old_ref, uint64_t new_ref, uint32_t shares, uint32_t price);
@@ -44,6 +48,7 @@ public:
         ++stats_.messages;
         ++stats_.by_type[type];
     }
+    void on_malformed(uint8_t) { ++stats_.malformed; }
 
     const Stats& stats() const { return stats_; }
     const L3Book* book(uint16_t loc) const { return books_[loc].get(); }

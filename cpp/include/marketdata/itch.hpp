@@ -13,8 +13,11 @@
 //
 // parse_itch() walks a buffer and calls the handler's typed callbacks
 // directly (no virtual dispatch, no allocation, no copies of the payload).
-// Handlers implement every on_* method used below; unhandled message types
-// are skipped by length.
+// Handlers derive from itch::HandlerBase, which supplies a no-op for every
+// callback, and redefine the ones they need; unhandled message types are
+// skipped by length. A message shorter than its type's specified length is
+// reported through on_malformed() and never decoded, so a corrupt or
+// truncated file cannot make the decoder read outside the buffer.
 namespace itch {
 
 inline uint16_t be16(const uint8_t* p) { return static_cast<uint16_t>((p[0] << 8) | p[1]); }
@@ -35,6 +38,46 @@ inline uint64_t be48(const uint8_t* p) {
 // Field offsets common to order messages: type(0) locate(1) tracking(3) timestamp(5)
 constexpr size_t kLocate = 1, kTs = 5, kRef = 11;
 
+// Specified length of each message type we decode (ITCH 5.0 spec, section 4).
+// 0 = type not decoded, any length accepted.
+constexpr uint16_t min_length(uint8_t type) {
+    switch (type) {
+        case 'S': return 12;
+        case 'R': return 39;
+        case 'H': return 25;
+        case 'A': return 36;
+        case 'F': return 40;
+        case 'E': return 31;
+        case 'C': return 36;
+        case 'X': return 23;
+        case 'D': return 19;
+        case 'U': return 35;
+        case 'P': return 44;
+        case 'Q': return 40;
+        default:  return 0;
+    }
+}
+
+// Statically overridden (shadowed, not virtual) by handlers.
+struct HandlerBase {
+    void on_add(uint16_t, uint64_t, uint64_t, uint8_t, uint32_t, uint32_t) {}
+    void on_execute(uint16_t, uint64_t, uint64_t, uint32_t) {}
+    // Execution at a price other than the order's display price. Not
+    // printable = also reported in a bulk print (crosses): don't count it as
+    // a continuous-market trade.
+    void on_execute_with_price(uint16_t, uint64_t, uint64_t, uint32_t, bool /*printable*/, uint32_t /*price*/) {}
+    void on_cancel(uint16_t, uint64_t, uint64_t, uint32_t) {}
+    void on_delete(uint16_t, uint64_t, uint64_t) {}
+    void on_replace(uint16_t, uint64_t, uint64_t, uint64_t, uint32_t, uint32_t) {}
+    void on_directory(uint16_t, const char*) {}
+    void on_hidden_trade(uint16_t, uint64_t, uint32_t, uint32_t) {}
+    void on_cross(uint16_t, uint64_t, uint64_t /*shares*/, uint32_t /*price*/) {}
+    void on_trading_action(uint16_t, uint64_t, uint8_t /*state*/) {}
+    void on_system_event(uint64_t, uint8_t /*code*/) {}
+    void on_message(uint8_t) {}
+    void on_malformed(uint8_t /*type*/) {}
+};
+
 // Parses complete messages from [p, p + n); returns bytes consumed (a
 // trailing partial message is left for the caller's next buffer).
 template <typename H>
@@ -44,6 +87,12 @@ size_t parse_itch(const uint8_t* p, size_t n, H& h) {
         const uint16_t len = be16(p + off);
         if (off + 2 + len > n) break;
         const uint8_t* m = p + off + 2;
+        // Every ITCH message has the 11-byte common header.
+        if (len < 11 || len < min_length(m[0])) {
+            h.on_malformed(len ? m[0] : 0);
+            off += 2 + static_cast<size_t>(len);
+            continue;
+        }
         const uint16_t loc = be16(m + kLocate);
         const uint64_t ts  = be48(m + kTs);
         switch (m[0]) {
@@ -54,8 +103,8 @@ size_t parse_itch(const uint8_t* p, size_t n, H& h) {
             case 'E':   // Order Executed: ref(11) shares(19) match(23)
                 h.on_execute(loc, ts, be64(m + kRef), be32(m + 19));
                 break;
-            case 'C':   // Order Executed With Price: ... printable(31) price(32)
-                h.on_execute(loc, ts, be64(m + kRef), be32(m + 19));
+            case 'C':   // Order Executed With Price: ref(11) shares(19) match(23) printable(31) price(32)
+                h.on_execute_with_price(loc, ts, be64(m + kRef), be32(m + 19), m[31] == 'Y', be32(m + 32));
                 break;
             case 'X':   // Order Cancel (partial): ref(11) cancelled shares(19)
                 h.on_cancel(loc, ts, be64(m + kRef), be32(m + 19));
@@ -72,11 +121,20 @@ size_t parse_itch(const uint8_t* p, size_t n, H& h) {
             case 'P':   // Trade (non-cross, hidden liquidity): side(19) shares(20) stock(24) price(32)
                 h.on_hidden_trade(loc, ts, be32(m + 20), be32(m + 32));
                 break;
+            case 'Q':   // Cross Trade: shares(11, 8 bytes) stock(19) price(27)
+                h.on_cross(loc, ts, be64(m + 11), be32(m + 27));
+                break;
+            case 'H':   // Stock Trading Action: stock(11) state(19)
+                h.on_trading_action(loc, ts, m[19]);
+                break;
+            case 'S':   // System Event: code(11)
+                h.on_system_event(ts, m[11]);
+                break;
             default:
                 break;
         }
         h.on_message(m[0]);
-        off += 2 + len;
+        off += 2 + static_cast<size_t>(len);
     }
     return off;
 }
