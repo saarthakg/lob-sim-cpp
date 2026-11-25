@@ -24,8 +24,9 @@ itself. It runs entirely on **free public data**.
 - **The imbalance signal is real.** Correlation with 1–5 s returns is 0.13–0.34
   out of sample, and on BTC it is profitable before costs when trading on it as a
   taker.
-- **Passive execution beats crossing the spread** by 1.8 bp per parent order,
-  on every test day.
+- **Passive execution beats crossing the spread** by 2.4-3.7 bp per parent
+  order, on all 50 days and all four symbols (12,000 paired parents each), and
+  under a pessimistic queue model.
 - **Retail-latency market making is still not profitable.** Adverse selection
   outweighs the spread captured at every fee tier tested, including a maker
   rebate. The platform quantifies the gap: how much edge, how fast a reaction
@@ -580,18 +581,39 @@ venue, and no public Bybit L3 feed exists.
 - On ATOM, crossing a 5.9 bp tick costs more than the signal predicts.
 - This is why the signal belongs inside a passive quoter, not a taker.
 
-**TWAP.** Buy 1 BTC in 20 one-minute slices; costs are against the arrival mid.
+**Passive execution.** Each of 50 days is cut into 240 back-to-back 5-minute
+parent orders (alternating buy and sell, 5 slices each), worked by four
+algorithms on the same data: 12,000 paired parents per symbol. Nothing is
+fitted. 5 ms each-way latency, VIP0 fees
+([results/execution/EXECUTION.md](results/execution/EXECUTION.md),
+`python python/experiments/execution_study.py`).
 
-| Mode | Price shortfall | Fees | Total cost | Filled passively |
+| Saving against crossing the spread (bp, fees included) | Join | Peg | Smart | Peg, pessimistic queue |
 |---|---|---|---|---|
-| Aggressive (cross every slice) | −2.49 bp | 5.50 bp | **+3.01 bp** | 0% |
-| Passive (post, sweep remainder) | −1.72 bp | 2.96 bp | **+1.24 bp** | 73% |
+| BTCUSDT | +2.04 | **+2.38** | +1.27 | +2.30 |
+| ATOMUSDT | +2.59 | **+3.56** | +2.37 | +3.48 |
+| XLMUSDT | +2.79 | **+3.69** | +2.47 | +3.60 |
+| ADAUSDT | +2.72 | **+3.42** | +2.77 | +3.32 |
 
-Passive slicing gives back about 0.8 bp of price, because waiting is
-adversely selected. It saves about 2.5 bp in fees. It was the cheaper choice
-on **all four** test days, by 1.8 bp per execution on average. That is the
-one robustly positive, actionable result here: **use limit orders to
-*execute*, not to make markets**.
+![Execution savings](docs/plots/execution_savings.png)
+
+- **Every passive algorithm beat crossing on every one of the 50 days, on every
+  symbol.** Day-clustered t-statistics are 31 to 101.
+- **Pegging is best**: follow the touch, then sweep what is left at the end of
+  the slot. It fills 74-93% passively.
+- **The imbalance signal did not help execution.** Crossing early when the book
+  leans your way (Smart) improves the price but pays the taker fee more often.
+- **Where the saving comes from.** On BTCUSDT pegging saves 3.3 bp of fees and
+  gives back 0.9 bp of price. On the large-tick contracts it wins on both.
+- **It does not depend on the queue model.** Assuming cancellations ahead never
+  help us moves the result by less than 0.1 bp.
+
+> An earlier version of this section reported a 1.8 bp saving from *four*
+> executions, one per day, and called it robust. This study replaces it. The
+> conclusion survived, the evidence did not.
+
+This is the one robustly positive, actionable result here: **use limit orders
+to *execute*, not to make markets**.
 
 ### 4. What it would take
 
