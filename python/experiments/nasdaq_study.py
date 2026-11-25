@@ -116,6 +116,25 @@ def main() -> int:
     return nasdaq_confirm.main(a.jobs)
 
 
+def latency_table(ladder: str, days: list, jobs: int, csv: Path) -> list:
+    """Cents per maker share against each-way latency, pooled over symbols and days."""
+    df = sweep([(s, d, g, l) for s in SYMBOLS for d in days for g in (NAIVE, ladder) for l in LATENCIES], jobs)
+    df.to_csv(csv, index=False)
+    md = ["\n## Latency\n", "All symbols pooled, cents per maker share, each-way latency (feed, entry and response).\n",
+          "| latency µs | " + " | ".join(f"{n}: shares/day | edge | 5 s markout | net no rebate | net top"
+                                          for n in ("naive", "ladder")) + " |",
+          "|---|" + "---|" * 10]
+    for lat, g in df.groupby("latency_us"):
+        cells = []
+        for args in (NAIVE, ladder):
+            x = g[g.args == args]
+            sh = max(x.maker_shares.sum(), 1)
+            cells.append(f"{sh / x.day.nunique():,.0f} | " + " | ".join(
+                f"{x[c].sum() / sh * 100:+.3f}" for c in ("edge", "mk_5s", "net_none", "net_top")))
+        md.append(f"| {lat:,} | " + " | ".join(cells) + " |")
+    return md
+
+
 def dev(jobs: int) -> int:
     grid = [ladder_args(dict(zip(GRID, v))) for v in itertools.product(*GRID.values())]
     df = sweep([(s, d, g, SELECT_LATENCY_US) for s in SYMBOLS for d in DEV_DAYS for g in [NAIVE] + grid], jobs)
@@ -147,6 +166,8 @@ def dev(jobs: int) -> int:
     for _, args, p, sh in sorted(tab, key=lambda x: -x[0]):
         md.append(f"| `{args.replace('--strategy ', '').replace('--quote-on-book ', '').replace('--', '')}` | "
                   + " | ".join(f"{p[k].mean():+,.0f} | {tstat(p[k]):+.2f}" for k in REBATES) + f" | {sh:,.0f} |")
+    best = max(tab, key=lambda x: x[0] if x[1] != NAIVE else -np.inf)[1]
+    md += latency_table(best, DEV_DAYS, jobs, OUT / "dev_latency.csv")
     (OUT / "DEV_GRID.md").write_text("\n".join(md) + "\n")
     print("\n".join(md))
     return 0
