@@ -1,6 +1,7 @@
 #pragma once
 #include "quote_manager.hpp"
 #include "strategy.hpp"
+#include <limits>
 
 // Queue-priority ladder market maker for *large-tick* contracts — books where
 // the spread is pinned at one tick and the tick itself is wide relative to fees
@@ -40,6 +41,11 @@ public:
         double  alpha_obi       = 0.0;
         double  obi_band_bps    = 5.0;
         double  pull_threshold  = 0.1;      // ticks of adverse predicted move that pulls the touch quote
+        // Hysteresis: a *new* touch order is only sent when the signal is at
+        // least this favourable (bid: adj >= join, ask: adj <= -join), while an
+        // existing one is kept until pull_threshold. NaN = join whenever not
+        // pulled. A negative value below -pull_threshold has no effect.
+        double  join_threshold  = std::numeric_limits<double>::quiet_NaN();
         double  inventory_skew  = 0.0;      // ticks of alpha per order-size unit of inventory
         int     max_spread_ticks = 1;       // only make markets when the book is this tight
         double  depletion_pull  = 0.0;      // 0 = off; e.g. 0.5 = pull after half the level traded

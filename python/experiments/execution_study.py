@@ -29,7 +29,10 @@ BIN = ROOT / "build" / "lob_sim"
 DATA = ROOT / "data" / "raw" / "bybit"
 OUT = ROOT / "results" / "execution"
 SIZES = {"BTCUSDT": 0.05, "ATOMUSDT": 100, "XLMUSDT": 1000, "ADAUSDT": 1000}   # per slice
-ALGOS = ["cross", "join", "peg", "smart"]
+# name -> (lob_sim --algo, extra args). "pessimistic queue" re-runs Peg assuming
+# no cancellation ahead of us ever helps: a lower bound on passive fills.
+ALGOS = {"cross": ("cross", []), "join": ("join", []), "peg": ("peg", []), "smart": ("smart", []),
+         "peg, pessimistic queue": ("peg", ["--queue", "riskaverse"])}
 SLICES, HORIZON_S, LATENCY_US = 5, 300, 5000
 
 
@@ -44,11 +47,12 @@ def days_on_disk(sym: str) -> list:
 
 def run(job) -> pd.DataFrame:
     sym, day, algo = job
-    out = OUT / "runs" / f"{sym}_{day}_{algo}"
+    name, extra = ALGOS[algo]
+    out = OUT / "runs" / f"{sym}_{day}_{name}{''.join(extra).replace('--', '_')}"
     csv = out / "executions.csv"
     if not csv.exists():
         cmd = [str(BIN), "--replay", str(DATA / f"{day}_{sym}_ob200.data.zip"),
-               "--trades", str(DATA / f"{sym}{day}.csv.gz"), "--strategy", "exec", "--algo", algo,
+               "--trades", str(DATA / f"{sym}{day}.csv.gz"), "--strategy", "exec", "--algo", name, *extra,
                "--order-size", str(SIZES[sym]), "--slices", str(SLICES), "--horizon-s", str(HORIZON_S),
                "--latency-us", str(LATENCY_US), "--quiet", "--no-book-metrics", "--sample-ms", "60000",
                "--output", str(out)]

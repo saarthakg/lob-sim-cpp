@@ -104,7 +104,7 @@ Strategy
              --alpha-micro A --alpha-obi B --alpha-scale S --obi-band-bps W
              --no-fee-in-quotes --warmup-s S --calib-log --depletion-pull F
   ladder:    --levels N --alpha-micro A --alpha-obi B --alpha-scale S
-             --pull-threshold T --inventory-skew K --max-spread-ticks N --depletion-pull F
+             --pull-threshold T --join-threshold J --inventory-skew K --max-spread-ticks N --depletion-pull F
   naive:     --offset-ticks N
   imbalance: --threshold T --hold-ms H
   twap:      --side buy|sell --slices N --interval-s S --passive
@@ -159,7 +159,7 @@ static const std::set<std::string> kOptions = {
     // strategy
     "--strategy", "--order-size", "--max-position", "--gamma", "--levels", "--half-spread-mult", "--skew-mult",
     "--alpha-micro", "--alpha-obi", "--alpha-scale", "--obi-band-bps", "--min-half-spread-ticks", "--warmup-s",
-    "--max-depth-ticks", "--depletion-pull", "--pull-threshold", "--inventory-skew", "--max-spread-ticks",
+    "--max-depth-ticks", "--depletion-pull", "--pull-threshold", "--join-threshold", "--inventory-skew", "--max-spread-ticks",
     "--offset-ticks", "--threshold", "--hold-ms", "--algo", "--horizon-s", "--gap-s", "--cross-imbalance", "--side", "--slices", "--interval-s", "--probes"};
 
 static size_t edit_distance(const std::string& a, const std::string& b) {
@@ -340,6 +340,7 @@ static std::unique_ptr<Strategy> make_strategy(const std::string& name, const Ar
         c.alpha_obi      = a.num("--alpha-obi", 0.0) * a.num("--alpha-scale", 1.0);
         c.obi_band_bps   = a.num("--obi-band-bps", c.obi_band_bps);
         c.pull_threshold = a.num("--pull-threshold", c.pull_threshold);
+        c.join_threshold = a.num("--join-threshold", c.join_threshold);
         c.inventory_skew = a.num("--inventory-skew", c.inventory_skew);
         c.max_spread_ticks = static_cast<int>(a.num("--max-spread-ticks", c.max_spread_ticks));
         c.depletion_pull = a.num("--depletion-pull", c.depletion_pull);

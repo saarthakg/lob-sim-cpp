@@ -4,6 +4,7 @@
 #include "../include/strategy/estimators.hpp"
 #include "../include/strategy/glft_market_maker.hpp"
 #include "../include/strategy/imbalance_strategy.hpp"
+#include "../include/strategy/ladder_market_maker.hpp"
 #include "../include/strategy/twap_strategy.hpp"
 
 #include <cmath>
@@ -126,4 +127,30 @@ TEST_CASE("GLFT does not quote before warm-up and calibration", "[strategy]") {
     auto r = bt.run();
     REQUIRE(r.orders_sent == 0);
     REQUIRE_FALSE(mm.calibrated());
+}
+
+TEST_CASE("Ladder join threshold: joins only on a favourable book, then holds until the pull threshold", "[strategy]") {
+    auto snap = [](Timestamp ts, Qty bq, Qty aq) {
+        MarketEvent e;
+        e.ts = ts; e.type = EventType::Snapshot;
+        e.bids = {{100, bq}}; e.asks = {{101, aq}};
+        return e;
+    };
+    // weighted_mid - mid in ticks = bid share - 0.5
+    std::vector<MarketEvent> ev = {snap(1000, 40, 60),     // -0.10: don't join the bid
+                                   snap(2000, 70, 30),     // +0.20: join
+                                   snap(3000, 40, 60),     // -0.10: hold
+                                   snap(4000, 10, 90),     // -0.40: pull
+                                   snap(5000, 10, 90)};
+    Instrument i; i.tick_size = 0.01; i.lot_size = 1;
+    VectorSource src(i, ev);
+    LadderMarketMaker::Config c;
+    c.levels = 1; c.alpha_micro = 1.0; c.pull_threshold = 0.3; c.join_threshold = 0.09; c.interval_us = 0;
+    LadderMarketMaker s(c);
+    BacktestConfig cfg; cfg.quiet = true;
+    Backtester bt(src, s, cfg);
+    const RunSummary r = bt.run();
+
+    REQUIRE(r.orders_sent == 2);      // one ask (t=1000, signal -0.10), one bid (t=2000)
+    REQUIRE(r.cancels_sent == 1);     // only the bid, at t=4000
 }

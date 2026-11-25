@@ -22,13 +22,25 @@ void LadderMarketMaker::on_timer(StrategyContext& ctx) {
     const double adj = alpha - cfg_.inventory_skew * q;
 
     const bool wide = (ba - bb) > cfg_.max_spread_ticks;
+    bool join_bid = true, join_ask = true;
+    if (!std::isnan(cfg_.join_threshold)) {
+        bool have_bid = false, have_ask = false;
+        for (const auto& [id, o] : ctx.orders()) {
+            (void)id;
+            if (o.type != OrderType::Limit || o.cancel_sent) continue;
+            have_bid = have_bid || (o.side == Side::Bid && o.price == bb);
+            have_ask = have_ask || (o.side == Side::Ask && o.price == ba);
+        }
+        join_bid = have_bid || adj >= cfg_.join_threshold;
+        join_ask = have_ask || adj <= -cfg_.join_threshold;
+    }
     std::vector<Price> bids, asks;
     for (int i = 0; i < cfg_.levels; ++i) {
         // On a wide book, don't stand at the touch (it's inside a gap that is
         // about to close); keep only the resting ladder behind it.
         bool touch = (i == 0);
-        bool no_bid = touch && (wide || adj < -cfg_.pull_threshold || guard_.blocked(Side::Bid, bb));
-        bool no_ask = touch && (wide || adj > cfg_.pull_threshold || guard_.blocked(Side::Ask, ba));
+        bool no_bid = touch && (wide || !join_bid || adj < -cfg_.pull_threshold || guard_.blocked(Side::Bid, bb));
+        bool no_ask = touch && (wide || !join_ask || adj > cfg_.pull_threshold || guard_.blocked(Side::Ask, ba));
         if (pos + cfg_.order_qty <= cfg_.max_position && !no_bid) bids.push_back(bb - i);
         if (pos - cfg_.order_qty >= -cfg_.max_position && !no_ask) asks.push_back(ba + i);
     }
