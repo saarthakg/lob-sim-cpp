@@ -16,6 +16,7 @@
 #include "../include/util/timer.hpp"
 #include "live_capture.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -26,7 +27,10 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <set>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 static void print_help() {
     std::cout << R"(
@@ -117,23 +121,80 @@ struct Args {
     }
     double num(const std::string& k, double d) const {
         auto it = kv.find(k);
-        return it == kv.end() ? d : std::stod(it->second);
+        if (it == kv.end()) return d;
+        size_t used = 0;
+        double v = 0;
+        try { v = std::stod(it->second, &used); } catch (const std::exception&) { used = 0; }
+        if (used == 0 || used != it->second.size()) throw std::runtime_error(k + ": not a number: " + it->second);
+        return v;
     }
 };
 
+// Every option the program understands. Anything else is an error: a typo
+// must not silently run an experiment with the default value.
+static const std::set<std::string> kFlags = {
+    "--no-cross-fill", "--no-fee-in-quotes", "--calib-log", "--passive", "--quiet", "--no-book-metrics",
+    "--quote-on-book", "--measure-latency", "--help", "-h"};
+static const std::set<std::string> kOptions = {
+    // modes
+    "--replay", "--stats", "--live", "--live-capture", "--load-snapshot", "--convert-bitstamp-l3", "--replay-itch",
+    "--extract-itch", "--replay-l3",
+    // data
+    "--trades", "--symbol", "--symbols", "--date", "--snapshot-time", "--end-time", "--exchange", "--duration-minutes",
+    "--minutes", "--depth", "--tick-size", "--lot-size", "--output", "--sample-ms",
+    // exchange and latency
+    "--maker-fee-bps", "--taker-fee-bps", "--queue", "--queue-power", "--exchange-model", "--latency-us",
+    "--feed-latency-us", "--entry-latency-us", "--response-latency-us", "--jitter",
+    // strategy
+    "--strategy", "--order-size", "--max-position", "--gamma", "--levels", "--half-spread-mult", "--skew-mult",
+    "--alpha-micro", "--alpha-obi", "--alpha-scale", "--obi-band-bps", "--min-half-spread-ticks", "--warmup-s",
+    "--max-depth-ticks", "--depletion-pull", "--pull-threshold", "--inventory-skew", "--max-spread-ticks",
+    "--offset-ticks", "--threshold", "--hold-ms", "--side", "--slices", "--interval-s", "--probes"};
+
+static size_t edit_distance(const std::string& a, const std::string& b) {
+    std::vector<size_t> row(b.size() + 1);
+    for (size_t j = 0; j <= b.size(); ++j) row[j] = j;
+    for (size_t i = 1; i <= a.size(); ++i) {
+        size_t diag = row[0];
+        row[0] = i;
+        for (size_t j = 1; j <= b.size(); ++j) {
+            const size_t up = row[j];
+            row[j] = std::min({up + 1, row[j - 1] + 1, diag + (a[i - 1] != b[j - 1])});
+            diag = up;
+        }
+    }
+    return row[b.size()];
+}
+
 static Args parse_args(int argc, char** argv) {
-    static const std::map<std::string, bool> is_flag = {
-        {"--no-cross-fill", true}, {"--no-fee-in-quotes", true}, {"--calib-log", true},
-        {"--passive", true}, {"--quiet", true}, {"--no-book-metrics", true}, {"--quote-on-book", true}, {"--measure-latency", true}, {"--synthetic-demo", true}, {"--help", true},
-        {"-h", true}};
     Args a;
     for (int i = 1; i < argc; ++i) {
-        std::string k = argv[i];
-        if (is_flag.count(k)) { a.flags[k] = true; continue; }
-        if (k.rfind("--", 0) == 0 && i + 1 < argc) { a.kv[k] = argv[++i]; continue; }
-        std::cerr << "Ignoring argument: " << k << "\n";
+        const std::string k = argv[i];
+        if (kFlags.count(k)) { a.flags[k] = true; continue; }
+        if (kOptions.count(k)) {
+            if (i + 1 >= argc) throw std::runtime_error(k + " needs a value");
+            a.kv[k] = argv[++i];
+            continue;
+        }
+        std::string best;
+        size_t best_d = 4;   // suggest only near misses
+        for (const auto* set : {&kFlags, &kOptions})
+            for (const auto& o : *set)
+                if (size_t d = edit_distance(k, o); d < best_d) { best_d = d; best = o; }
+        throw std::runtime_error("unknown option " + k + (best.empty() ? "" : " (did you mean " + best + "?)"));
     }
     return a;
+}
+
+// Pick from a fixed set of names, so a typo in a *value* is an error too.
+template <typename T>
+static T choose(const Args& a, const std::string& key, const std::string& dflt,
+                const std::map<std::string, T>& options) {
+    auto it = options.find(a.str(key, dflt));
+    if (it != options.end()) return it->second;
+    std::string list;
+    for (const auto& [name, v] : options) { (void)v; list += (list.empty() ? "" : "|") + name; }
+    throw std::runtime_error(key + " must be one of " + list + ", not " + a.str(key));
 }
 
 static std::string default_output_dir() {
@@ -272,13 +333,13 @@ static std::unique_ptr<Strategy> make_strategy(const std::string& name, const Ar
     }
     if (name == "probe") {
         // Fill-model validation; see python/analysis/queue_model_validation.py.
-        Side side = a.str("--side", "buy") == "sell" ? Side::Ask : Side::Bid;
+        Side side = choose<Side>(a, "--side", "buy", {{"buy", Side::Bid}, {"sell", Side::Ask}});
         return std::make_unique<ProbeStrategy>(a.str("--probes"), side, inst,
                                                out_dir.empty() ? "" : out_dir + "/probe_orders.csv");
     }
     if (name == "twap") {
         TwapStrategy::Config c;
-        c.side        = a.str("--side", "buy") == "sell" ? Side::Ask : Side::Bid;
+        c.side        = choose<Side>(a, "--side", "buy", {{"buy", Side::Bid}, {"sell", Side::Ask}});
         c.num_slices  = static_cast<int>(a.num("--slices", 20));
         c.total_qty   = order_qty * c.num_slices;
         c.interval_us = static_cast<int64_t>(a.num("--interval-s", 60) * 1e6);
@@ -320,15 +381,13 @@ static int run_replay(EventSource& src, const Args& a) {
     cfg.measure_latency    = a.has("--measure-latency");
     cfg.exchange.fees.maker = a.num("--maker-fee-bps", 2.0) * 1e-4;
     cfg.exchange.fees.taker = a.num("--taker-fee-bps", 5.5) * 1e-4;
-    std::string q = a.str("--queue", "power");
-    cfg.exchange.queue.kind = (q == "riskaverse") ? QueueModel::Kind::RiskAverse
-                            : (q == "log")        ? QueueModel::Kind::ProbLog
-                                                  : QueueModel::Kind::ProbPower;
+    const std::string q = a.str("--queue", "power");
+    cfg.exchange.queue.kind = choose<QueueModel::Kind>(a, "--queue", "power",
+        {{"riskaverse", QueueModel::Kind::RiskAverse}, {"log", QueueModel::Kind::ProbLog}, {"power", QueueModel::Kind::ProbPower}});
     cfg.exchange.queue.power  = a.num("--queue-power", 2.0);
     cfg.exchange.fill_on_cross = !a.has("--no-cross-fill");
-    const std::string model = a.str("--exchange-model", "auto");
-    cfg.exchange_model = model == "l2" ? ExchangeModel::L2Queue
-                       : model == "l3" ? ExchangeModel::L3Exact : ExchangeModel::Auto;
+    cfg.exchange_model = choose<ExchangeModel>(a, "--exchange-model", "auto",
+        {{"auto", ExchangeModel::Auto}, {"l2", ExchangeModel::L2Queue}, {"l3", ExchangeModel::L3Exact}});
     int64_t lat = static_cast<int64_t>(a.num("--latency-us", 0));
     cfg.latency.feed_us      = static_cast<int64_t>(a.num("--feed-latency-us", static_cast<double>(lat)));
     cfg.latency.entry_us     = static_cast<int64_t>(a.num("--entry-latency-us", static_cast<double>(lat)));
@@ -634,10 +693,9 @@ static void run_load_snapshot(const std::string& path) {
 
 int main(int argc, char** argv) {
     if (argc < 2) { print_help(); return 0; }
-    Args a = parse_args(argc, argv);
-    if (a.has("--help") || a.has("-h")) { print_help(); return 0; }
-
     try {
+        const Args a = parse_args(argc, argv);
+        if (a.has("--help") || a.has("-h")) { print_help(); return 0; }
         if (a.has("--load-snapshot")) { run_load_snapshot(a.str("--load-snapshot")); return 0; }
         if (a.has("--convert-bitstamp-l3")) {
             if (!a.has("--output")) { std::cerr << "--convert-bitstamp-l3 requires --output <file.l3bin>\n"; return 1; }
