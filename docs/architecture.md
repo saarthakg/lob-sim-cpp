@@ -58,7 +58,7 @@ the `EventSource` and the `Exchange` change.
 
 | Path | Role |
 |---|---|
-| `core/order_book` | `std::map` L2 book in integer ticks/lots. Provides mid, weighted mid, touch and depth-band imbalance. `order_book_flat` is a sorted-vector variant kept for the benchmark. |
+| `core/order_book` | L2 book in integer ticks/lots on the bitmap price ladder. Provides mid, weighted mid, touch and depth-band imbalance. `order_book_flat` is a sorted-vector variant kept for the benchmark. |
 | `core/l3_book`, `core/price_ladder`, `util/flat_hash_map`, `util/object_pool` | Order-level book: pooled orders in intrusive FIFOs, open-addressing id map, bitmap-indexed price ladder. `core/reference_l3_book` is the textbook version used as test oracle and benchmark baseline. |
 | `marketdata/l3_format`, `marketdata/l3_record` | Fixed 48-byte binary order-level records (`.l3bin`); Bitstamp converter. |
 | `marketdata/bybit_parse` | Fixed-point parsers for Bybit book and trade messages, shared by the archive reader and the live feed. |
