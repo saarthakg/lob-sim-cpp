@@ -11,8 +11,11 @@ order-level events are kept (a few MB each, gzipped).
     python data/fetch_itch.py --list
 """
 import argparse
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -57,7 +60,10 @@ def fetch(day: str, symbols: list, out: Path) -> bool:
         # curl exits with a write error; the extractor's status is what counts.
         src = "-"
         cmd = f"curl -sSfL --retry 5 '{BASE}{FILES[day]}' | gzip -dc"
-    args = [str(BIN), "--extract-itch", src, "--date", day, "--symbols", ",".join(missing), "--output", str(out)]
+    # Work in a private directory and rename finished files into place, so a
+    # concurrent or interrupted run can never leave a partial file behind.
+    tmp = Path(tempfile.mkdtemp(prefix=f".{day}_", dir=out))
+    args = [str(BIN), "--extract-itch", src, "--date", day, "--symbols", ",".join(missing), "--output", str(tmp)]
     if cmd:
         dl = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         r = subprocess.run(args, stdin=dl.stdout, capture_output=True, text=True)
@@ -67,14 +73,13 @@ def fetch(day: str, symbols: list, out: Path) -> bool:
         r = subprocess.run(args, capture_output=True, text=True)
     print(r.stdout + r.stderr, flush=True)
     if r.returncode != 0:
-        print(f"{day}: FAILED (rc {r.returncode}); partial files removed", flush=True)
-        for s in missing:
-            (out / f"{day}_{s}.l3bin").unlink(missing_ok=True)
+        print(f"{day}: FAILED (rc {r.returncode}); nothing kept", flush=True)
+        shutil.rmtree(tmp)
         return False
-    for s in missing:
-        f = out / f"{day}_{s}.l3bin"
-        if f.exists():
-            subprocess.run(["gzip", "-1", "-f", str(f)], check=True)
+    for f in sorted(tmp.glob("*.l3bin")):
+        subprocess.run(["gzip", "-1", str(f)], check=True)
+        os.replace(f"{f}.gz", out / f"{f.name}.gz")
+    shutil.rmtree(tmp)
     with open(out / "extract_log.txt", "a") as log:
         log.write(r.stdout)
     return True
