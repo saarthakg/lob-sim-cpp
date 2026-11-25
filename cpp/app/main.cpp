@@ -2,6 +2,7 @@
 #include "../include/core/order_book.hpp"
 #include "../include/live/live_bybit_source.hpp"
 #include "../include/marketdata/itch_book_builder.hpp"
+#include "../include/marketdata/itch_l3_extractor.hpp"
 #include "../include/marketdata/l3_format.hpp"
 #include "../include/marketdata/event_source.hpp"
 #include "../include/marketdata/parser.hpp"
@@ -19,6 +20,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <fstream>
 #include <iostream>
@@ -54,6 +56,11 @@ Modes
         Replay a Nasdaq TotalView-ITCH 5.0 day into per-symbol order-level
         books (.gz is streamed through gzip). Reports compute (decode + book)
         and I/O time separately.
+  --extract-itch <NASDAQ_ITCH50 file | .gz | -> --date YYYY-MM-DD --symbols A,B --output <dir>
+        Split an ITCH day into one .l3bin per symbol for exact-queue
+        backtests ("-" reads decompressed ITCH from stdin, so a download can
+        be streamed without storing it). --end-time HH:MM:SS (default 16:00:00)
+        drops everything later.
   --replay-l3 <file.l3bin>
         Replay an L3 file through the order-level book: throughput and
         consistency checks.
@@ -449,6 +456,25 @@ static int run_replay_l3(const std::string& path) {
     return 0;
 }
 
+static std::vector<std::string> split_list(const std::string& list) {
+    std::vector<std::string> out;
+    for (size_t st = 0;;) {
+        const size_t c = list.find(',', st);
+        std::string item = list.substr(st, c == std::string::npos ? std::string::npos : c - st);
+        if (!item.empty()) out.push_back(std::move(item));
+        if (c == std::string::npos) return out;
+        st = c + 1;
+    }
+}
+
+// HH:MM:SS → nanoseconds since midnight.
+static uint64_t time_of_day_ns(const std::string& hms) {
+    unsigned h = 0, m = 0, s = 0;
+    if (std::sscanf(hms.c_str(), "%2u:%2u:%2u", &h, &m, &s) != 3 || h > 24 || m > 59 || s > 59)
+        throw std::runtime_error("bad time (want HH:MM:SS): " + hms);
+    return (h * 3600ULL + m * 60ULL + s) * 1'000'000'000ULL;
+}
+
 // ── Nasdaq ITCH 5.0 replay ───────────────────────────────────────────────────
 
 namespace {
@@ -504,30 +530,20 @@ static int run_replay_itch(const std::string& path, const Args& a) {
     ItchBookBuilder builder;
     ItchSnapshotter snap(builder);
     if (a.has("--snapshot-time")) {
-        unsigned h = 0, m = 0, sec = 0;
-        std::sscanf(a.str("--snapshot-time").c_str(), "%u:%u:%u", &h, &m, &sec);
-        snap.at_ns = (h * 3600ULL + m * 60ULL + sec) * 1000000000ULL;
-        std::string list = a.str("--symbols", "AAPL,MSFT,AMZN,TSLA,QQQ");
-        for (size_t st = 0;;) {
-            size_t c = list.find(',', st);
-            snap.symbols.push_back(list.substr(st, c == std::string::npos ? std::string::npos : c - st));
-            if (c == std::string::npos) break;
-            st = c + 1;
-        }
+        snap.at_ns   = time_of_day_ns(a.str("--snapshot-time"));
+        snap.symbols = split_list(a.str("--symbols", "AAPL,MSFT,AMZN,TSLA,QQQ"));
     }
     // Read in large chunks and time I/O (disk, or gzip for .gz) separately
     // from compute (ITCH decode + book updates): a full day is ~8 GB, more
     // than stays in a laptop's page cache, so end-to-end time is mostly disk.
-    const bool gz = path.size() > 3 && path.compare(path.size() - 3, 3, ".gz") == 0;
-    FILE* fp = gz ? ::popen(("gzip -dc '" + path + "'").c_str(), "r") : std::fopen(path.c_str(), "rb");
-    if (!fp) { std::cerr << "cannot open " << path << "\n"; return 1; }
+    InputFile in(path);
     std::vector<uint8_t> buf(256 << 20);
     size_t have = 0;
     double gb = 0, io_s = 0, cpu_s = 0;
     auto now = [] { return std::chrono::steady_clock::now(); };
     while (true) {
         auto t0 = now();
-        const size_t got = std::fread(buf.data() + have, 1, buf.size() - have, fp);
+        const size_t got = in.read(buf.data() + have, buf.size() - have);
         auto t1 = now();
         io_s += std::chrono::duration<double>(t1 - t0).count();
         if (got == 0) break;
@@ -539,7 +555,7 @@ static int run_replay_itch(const std::string& path, const Args& a) {
         have -= used;
         cpu_s += std::chrono::duration<double>(now() - t1).count();
     }
-    if (gz) ::pclose(fp); else std::fclose(fp);
+    const bool gz = in.compressed();
     const auto& s = builder.stats();
     const double msgs = static_cast<double>(std::max<uint64_t>(s.messages, 1));
     std::printf("ITCH 5.0 replay %s (%s)\n", path.c_str(), gz ? "streamed through gzip" : "read from disk");
@@ -558,6 +574,44 @@ static int run_replay_itch(const std::string& path, const Args& a) {
                 (unsigned long long)s.over_execute, (unsigned long long)s.subpenny_violations,
                 (unsigned long long)s.malformed, have);
     return 0;
+}
+
+static int run_extract_itch(const std::string& path, const Args& a) {
+    const std::string date = a.str("--date"), out = a.str("--output");
+    const auto symbols = split_list(a.str("--symbols"));
+    if (date.empty() || out.empty() || symbols.empty()) {
+        std::cerr << "--extract-itch requires --date, --symbols and --output <dir>\n";
+        return 1;
+    }
+    ItchL3Extractor ex(symbols, out, date, date_to_us(date), time_of_day_ns(a.str("--end-time", "16:00:00")));
+    InputFile in(path);
+    std::vector<uint8_t> buf(64 << 20);
+    size_t have = 0;
+    while (!ex.done()) {
+        const size_t got = in.read(buf.data() + have, buf.size() - have);
+        if (got == 0) break;
+        have += got;
+        const size_t used = itch::parse_itch(buf.data(), have, ex);
+        std::memmove(buf.data(), buf.data() + used, have - used);
+        have -= used;
+    }
+    const auto stats = ex.finish();
+    std::printf("ITCH extract %s %s: %llu messages, %llu malformed%s\n", date.c_str(), path.c_str(),
+                (unsigned long long)ex.messages(), (unsigned long long)ex.malformed(),
+                ex.done() ? "" : "  ** feed ended before --end-time **");
+    int missing = 0;
+    for (const auto& s : stats) {
+        if (!s.found) { std::printf("  %-6s not in this day's directory\n", s.symbol.c_str()); ++missing; continue; }
+        std::printf("  %-6s records %9llu  adds %8llu  prints %7llu  hidden %6llu  sub-penny %6llu  non-printable %4llu  "
+                    "sub-$1 skipped %4llu  unknown refs %llu  halts %llu  open cross %llu\n",
+                    s.symbol.c_str(), (unsigned long long)s.records, (unsigned long long)s.adds,
+                    (unsigned long long)s.prints, (unsigned long long)s.hidden_prints,
+                    (unsigned long long)s.subpenny_prints, (unsigned long long)s.nonprintable,
+                    (unsigned long long)s.skipped_subdollar, (unsigned long long)s.unknown_ref,
+                    (unsigned long long)s.halts_in_session, (unsigned long long)s.open_cross_shares);
+    }
+    if (!ex.done()) return 2;
+    return missing == static_cast<int>(stats.size()) ? 1 : 0;
 }
 
 // ── misc modes ───────────────────────────────────────────────────────────────
@@ -593,6 +647,7 @@ int main(int argc, char** argv) {
         }
         if (a.has("--replay-l3")) return run_replay_l3(a.str("--replay-l3"));
         if (a.has("--replay-itch")) return run_replay_itch(a.str("--replay-itch"), a);
+        if (a.has("--extract-itch")) return run_extract_itch(a.str("--extract-itch"), a);
         if (a.has("--live-capture")) {
             if (!a.has("--output")) { std::cerr << "--live-capture requires --output <csv>\n"; return 1; }
             run_live_capture(a.str("--live-capture"), static_cast<int>(a.num("--duration-minutes", 60)),
