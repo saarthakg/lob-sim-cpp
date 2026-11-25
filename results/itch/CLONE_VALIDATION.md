@@ -18,11 +18,11 @@ expect some of the queue ahead to cancel, look worse here than on an average
 order. Read their rows as "how often does the model jump a queue that really
 stayed in place", not as an unconditional error rate.
 
-14 symbols, 1 day(s), 19,034 clones (4,146 with an executed order behind them).
+14 symbols, 9 day(s), 288,295 clones (79,713 with an executed order behind them).
 
 | model | impossible fills (before the order ahead finished) | missed fills (order behind traded first) | clones filled |
 |---|---|---|---|
-| exact-queue L3 | 0 (0.00%) | 0 (0.00%) | 99.9% |
-| L2 power-2 | 1,873 (9.84%) | 93 (2.24%) | 99.9% |
-| L2 risk-averse | 88 (0.46%) | 781 (18.84%) | 99.9% |
-| L2 log | 3,113 (16.35%) | 136 (3.28%) | 99.9% |
+| exact-queue L3 | 0 (0.00%) | 2 (0.00%) | 99.9% |
+| L2 power-2 | 13,096 (4.54%) | 1,400 (1.76%) | 100.0% |
+| L2 risk-averse | 735 (0.25%) | 11,410 (14.31%) | 99.9% |
+| L2 log | 20,947 (7.27%) | 3,264 (4.09%) | 100.0% |
