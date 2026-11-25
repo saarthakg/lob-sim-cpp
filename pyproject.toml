@@ -1,0 +1,21 @@
+[build-system]
+requires = ["scikit-build-core>=0.10"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "lobsim"
+version = "0.1.0"
+description = "Limit-order-book backtesting with exact queue priority (C++ engine)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["numpy"]
+
+[tool.scikit-build]
+wheel.packages = ["python/lobsim"]
+cmake.args = ["-DLOBSIM_PYTHON_ONLY=ON"]
+cmake.build-type = "Release"
+sdist.include = ["cpp", "python/lobsim", "CMakeLists.txt"]
+sdist.exclude = ["data", "results", "docs", "build*"]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]

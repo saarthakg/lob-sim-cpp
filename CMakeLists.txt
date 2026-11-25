@@ -26,6 +26,18 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+# ── lob_core library ──────────────────────────────────────────────────────────
+file(GLOB_RECURSE LOB_CORE_SRCS CONFIGURE_DEPENDS
+  "cpp/src/core/*.cpp"
+  "cpp/src/marketdata/*.cpp"
+  "cpp/src/sim/*.cpp"
+  "cpp/src/strategy/*.cpp"
+  "cpp/src/util/*.cpp"
+)
+
+option(LOBSIM_PYTHON_ONLY "Build nothing but the Python module (used by pip install)" OFF)
+if(NOT LOBSIM_PYTHON_ONLY)
+
 FetchContent_Declare(
   Catch2
   GIT_REPOSITORY https://github.com/catchorg/Catch2.git
@@ -44,15 +56,6 @@ FetchContent_Declare(
   GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(ixwebsocket)
-
-# ── lob_core library ──────────────────────────────────────────────────────────
-file(GLOB_RECURSE LOB_CORE_SRCS CONFIGURE_DEPENDS
-  "cpp/src/core/*.cpp"
-  "cpp/src/marketdata/*.cpp"
-  "cpp/src/sim/*.cpp"
-  "cpp/src/strategy/*.cpp"
-  "cpp/src/util/*.cpp"
-)
 
 add_library(lob_core STATIC ${LOB_CORE_SRCS})
 target_include_directories(lob_core PUBLIC cpp/include)
@@ -85,6 +88,8 @@ target_link_libraries(lob_bench PRIVATE lob_core)
 add_executable(lob_bench_l3 cpp/bench/bench_l3.cpp)
 target_link_libraries(lob_bench_l3 PRIVATE lob_core)
 
+endif()   # NOT LOBSIM_PYTHON_ONLY
+
 # ── fuzz targets (Clang + libFuzzer) ──────────────────────────────────────────
 option(LOBSIM_FUZZ "Build libFuzzer targets" OFF)
 if(LOBSIM_FUZZ)
@@ -95,4 +100,29 @@ if(LOBSIM_FUZZ)
     target_compile_options(${target} PRIVATE -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined)
     target_link_options(${target} PRIVATE -fsanitize=fuzzer,address,undefined)
   endforeach()
+endif()
+
+# ── Python module (pybind11) ──────────────────────────────────────────────────
+option(LOBSIM_PYTHON "Build the lobsim Python module" OFF)
+if(LOBSIM_PYTHON OR LOBSIM_PYTHON_ONLY)
+  find_package(Python 3.9 REQUIRED COMPONENTS Interpreter Development.Module)
+  set(PYBIND11_FINDPYTHON ON)   # use the interpreter found above, not whichever is first on PATH
+  FetchContent_Declare(
+    pybind11
+    GIT_REPOSITORY https://github.com/pybind/pybind11.git
+    GIT_TAG        v2.13.6
+    GIT_SHALLOW    TRUE
+  )
+  FetchContent_MakeAvailable(pybind11)
+  # The core sources are compiled into the module directly, so it has no
+  # dependency on how lob_core was built (position-independent or not).
+  pybind11_add_module(_lobsim cpp/python/module.cpp ${LOB_CORE_SRCS})
+  target_include_directories(_lobsim PRIVATE cpp/include)
+  target_link_libraries(_lobsim PRIVATE nlohmann_json::nlohmann_json)
+  # `pip install .` (scikit-build-core) installs it; a plain CMake build drops
+  # it next to the package so python/ can be used directly from the checkout.
+  install(TARGETS _lobsim DESTINATION lobsim)
+  if(NOT SKBUILD)
+    set_target_properties(_lobsim PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/python/lobsim")
+  endif()
 endif()

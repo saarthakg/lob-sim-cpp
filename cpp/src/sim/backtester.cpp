@@ -359,6 +359,9 @@ void Backtester::sample(Timestamp t) {
     ask_up_ += has_ask;
     ++samples_;
 
+    if (cfg_.record_equity)
+        equity_.push_back({t, mid * inst_.tick_size, pf_.position_units(), pf_.total_pnl(mid), pf_.total_fees_paid(), net,
+                           fills_.size()});
     if (w_->equity) {
         w_->equity->write_row({
             std::to_string(t), fmt(mid * inst_.tick_size, px_prec_),
@@ -515,6 +518,10 @@ void Backtester::finalize() {
 
 void Backtester::write_summary_json(const RunSummary& s, const std::string& path,
                                     const std::map<std::string, std::string>& config) {
+    std::ofstream(path) << summary_json(s, config) << "\n";
+}
+
+std::string Backtester::summary_json(const RunSummary& s, const std::map<std::string, std::string>& config) {
     nlohmann::json j;
     if (!config.empty()) j["config"] = config;
     j["strategy"] = s.strategy;
@@ -565,5 +572,5 @@ void Backtester::write_summary_json(const RunSummary& s, const std::string& path
     if (s.recv_to_engine.n) j["latency"]["recv_to_engine"] = pj(s.recv_to_engine);
     if (s.tick_to_trade.n)  j["latency"]["tick_to_trade"]  = pj(s.tick_to_trade);
     if (s.engine_to_trade.n) j["latency"]["engine_to_trade"] = pj(s.engine_to_trade);
-    std::ofstream(path) << j.dump(2) << "\n";
+    return j.dump(2);
 }

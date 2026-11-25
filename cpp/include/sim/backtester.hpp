@@ -60,6 +60,16 @@ struct BacktestConfig {
     // Replay: stamp each event's local_ns at pop time, so engine compute
     // (pop -> order) is measured offline exactly as on a live feed.
     bool           measure_latency = false;
+    bool           record_equity = false;   // keep the equity curve in memory
+};
+
+// One sample of the account, every sample_us (see BacktestConfig::record_equity).
+struct EquitySample {
+    Timestamp ts = 0;
+    double mid = 0.0;        // quote ccy
+    double position = 0.0;   // base units
+    double gross_pnl = 0.0, fees = 0.0, net_pnl = 0.0;   // quote ccy
+    uint64_t fills = 0;
 };
 
 static constexpr int N_MARKOUTS = 6;
@@ -130,6 +140,8 @@ public:
     RunSummary run();
 
     const std::vector<FillRecord>& fills() const { return fills_; }
+    const std::vector<EquitySample>& equity() const { return equity_; }
+    static std::string summary_json(const RunSummary& s, const std::map<std::string, std::string>& config = {});
     const Portfolio& portfolio() const { return pf_; }
 
     static void write_summary_json(const RunSummary& s, const std::string& path,
@@ -198,6 +210,7 @@ private:
     std::vector<int64_t> lat_recv_, lat_t2t_, lat_e2t_;
     void note_submit();
     std::vector<FillRecord> fills_;
+    std::vector<EquitySample> equity_;
     std::array<size_t, N_MARKOUTS> markout_cursor_{};
     std::unordered_map<OrderId, double> queue_at_entry_;
     RunSummary sum_;
