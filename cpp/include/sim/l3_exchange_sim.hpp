@@ -4,6 +4,7 @@
 #include "exchange_sim.hpp"
 
 #include <deque>
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -84,6 +85,17 @@ private:
     struct Phantom { Side side; Price price; };
     std::unordered_map<uint64_t, Deferred> deferred_;
     std::unordered_map<uint64_t, Phantom>  phantoms_;       // by the owner's order id; size lives in book_
+    // How many of them rest at each [side][price], so a print visits only the
+    // levels it can reach.
+    std::map<Price, size_t> phantom_levels_[2];
+    std::vector<Price> walk_prices_;
+    void add_phantom(uint64_t id, Phantom ph);
+    bool erase_phantom(uint64_t id);
+    // Fills cands_ with our orders and displaced size on `side` at `limit` or
+    // better, in price-time priority, until they could absorb `qty`. At `limit`
+    // itself the walk stops at `stop_before` (the maker a print names); with
+    // `front_only` it stops at the first real order instead.
+    void walk(Side side, Price limit, Qty qty, uint64_t stop_before, bool front_only, bool include_limit);
     std::deque<std::pair<Timestamp, uint64_t>> expiry_;
     std::unordered_map<uint64_t, bool> shrunk_;             // incoming orders partly executed on arrival by us
     Qty our_print_volume_ = 0, displaced_absorbed_ = 0;

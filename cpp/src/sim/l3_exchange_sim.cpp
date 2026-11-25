@@ -153,14 +153,65 @@ void L3ExchangeSim::apply_delete(const L3Record& r, Timestamp ts) {
     }
     const Phantom ph{o->side, o->price};
     if (book_.modify(r.id, d.extra) && d.extra > 0) {
-        phantoms_[r.id] = ph;
+        add_phantom(r.id, ph);
         if (cfg_.displaced_ttl_us > 0) expiry_.push_back({ts + cfg_.displaced_ttl_us, r.id});
+    }
+}
+
+void L3ExchangeSim::add_phantom(uint64_t id, Phantom ph) {
+    phantoms_[id] = ph;
+    phantom_levels_[ph.side == Side::Bid ? 0 : 1][ph.price] += 1;
+}
+
+bool L3ExchangeSim::erase_phantom(uint64_t id) {
+    auto it = phantoms_.find(id);
+    if (it == phantoms_.end()) return false;
+    auto& levels = phantom_levels_[it->second.side == Side::Bid ? 0 : 1];
+    auto lv = levels.find(it->second.price);
+    if (--lv->second == 0) levels.erase(lv);
+    phantoms_.erase(it);
+    return true;
+}
+
+void L3ExchangeSim::walk(Side side, Price limit, Qty qty, uint64_t stop_before, bool front_only,
+                         bool include_limit) {
+    cands_.clear();
+    auto better = [&](Price a, Price b) { return side == Side::Bid ? a > b : a < b; };
+    walk_prices_.clear();
+    for (const auto& [id, o] : ours_) {
+        (void)id;
+        if (o.req.side == side && (better(o.req.price, limit) || (include_limit && o.req.price == limit)))
+            walk_prices_.push_back(o.req.price);
+    }
+    const auto& lv = phantom_levels_[side == Side::Bid ? 0 : 1];
+    auto visit = [&](Price p) {
+        if (!better(p, limit) && !(include_limit && p == limit)) return false;
+        walk_prices_.push_back(p);
+        return true;
+    };
+    if (side == Side::Bid) { for (auto it = lv.rbegin(); it != lv.rend() && visit(it->first); ++it) {} }
+    else                   { for (auto it = lv.begin(); it != lv.end() && visit(it->first); ++it) {} }
+    std::sort(walk_prices_.begin(), walk_prices_.end(), better);
+    walk_prices_.erase(std::unique(walk_prices_.begin(), walk_prices_.end()), walk_prices_.end());
+
+    Qty found = 0;
+    for (Price p : walk_prices_) {
+        book_.for_each_in_level_while(side, p, [&](const L3Book::Order& o) {
+            const bool mine = (o.id & OURS) != 0, displaced = !mine && phantoms_.count(o.id) != 0;
+            if (p == limit && (o.id == stop_before || (front_only && !mine && !displaced))) return false;
+            if (mine || displaced) {
+                cands_.push_back({mine ? o.id & ~OURS : 0, p, cands_.size(), displaced ? o.id : 0});
+                found += o.qty;
+            }
+            return found < qty;
+        });
+        if (found >= qty) break;
     }
 }
 
 void L3ExchangeSim::expire_phantoms(Timestamp ts) {
     while (!expiry_.empty() && expiry_.front().first <= ts) {
-        if (phantoms_.erase(expiry_.front().second)) book_.cancel(expiry_.front().second);
+        if (erase_phantom(expiry_.front().second)) book_.cancel(expiry_.front().second);
         expiry_.pop_front();
     }
 }
@@ -184,6 +235,15 @@ void L3ExchangeSim::on_print(const L3Record& r, Timestamp ts, Portfolio& pf, std
     const bool maker_at_p = maker && maker->side == passive && maker->price == P;
     const bool hidden = (r.id == 0);   // executed against a non-displayed order
     if (!maker && !hidden) ++missing_maker_;
+
+    if (cfg_.displace_volume) {
+        walk(passive, P, r.qty, r.id, hidden, hidden || maker_at_p);
+        const Qty taken = cands_.empty() ? 0 : allocate(r.qty, ts, FillCause::TradeAtPrice, P, pf, out);
+        if (hidden) return;
+        if (taken > 0) defer(r.id, taken, r.qty);
+        else if (auto it = deferred_.find(r.id); it != deferred_.end()) it->second.pending += r.qty;
+        return;
+    }
 
     // Rank of each order in P's FIFO, computed only if we rest at P.
     bool level_loaded = false;
@@ -215,37 +275,12 @@ void L3ExchangeSim::on_print(const L3Record& r, Timestamp ts, Portfolio& pf, std
             if (rank < maker_rank) cands_.push_back({id, px, rank});
         }
     }
-    if (cfg_.displace_volume) {
-        for (const auto& [id, ph] : phantoms_) {
-            if (ph.side != passive || id == r.id) continue;
-            const bool better = (passive == Side::Bid) ? ph.price > P : ph.price < P;
-            bool ahead = better;
-            if (!better && ph.price == P) {
-                if (hidden) ahead = true;   // displayed beats hidden at the same price
-                else if (maker_at_p) {
-                    if (!level_loaded) load_level();
-                    const size_t rank = static_cast<size_t>(
-                        std::find(level_ids_.begin(), level_ids_.end(), id) - level_ids_.begin());
-                    ahead = rank < maker_rank;
-                }
-            }
-            if (ahead) cands_.push_back({0, ph.price, 0, id});
-        }
-        // Phantoms and our orders can share a level: rank everything by FIFO.
-        for (Cand& c : cands_)
-            c.rank = static_cast<size_t>(book_.queue_ahead(c.phantom ? c.phantom : syn(c.id)));
-    }
-    Qty taken = 0;
-    if (!cands_.empty()) {
-        std::sort(cands_.begin(), cands_.end(), [&](const Cand& a, const Cand& b) {
-            if (a.price != b.price) return passive == Side::Bid ? a.price > b.price : a.price < b.price;
-            return a.rank < b.rank;
-        });
-        taken = allocate(r.qty, ts, FillCause::TradeAtPrice, P, pf, out);
-    }
-    if (!cfg_.displace_volume || hidden) return;
-    if (taken > 0) defer(r.id, taken, r.qty);
-    else if (auto it = deferred_.find(r.id); it != deferred_.end()) it->second.pending += r.qty;
+    if (cands_.empty()) return;
+    std::sort(cands_.begin(), cands_.end(), [&](const Cand& a, const Cand& b) {
+        if (a.price != b.price) return passive == Side::Bid ? a.price > b.price : a.price < b.price;
+        return a.rank < b.rank;
+    });
+    allocate(r.qty, ts, FillCause::TradeAtPrice, P, pf, out);
 }
 
 void L3ExchangeSim::on_resting_cross(const L3Record& r, Side side, Price px, Timestamp ts, const OrderBook& l2,
@@ -253,30 +288,28 @@ void L3ExchangeSim::on_resting_cross(const L3Record& r, Side side, Price px, Tim
     // A crossed real book means an incoming taker; its trades arrive as prints.
     if (!l2.empty() && l2.crossed()) return;
     const Side ours_side = (side == Side::Bid) ? Side::Ask : Side::Bid;
+    if (cfg_.displace_volume) {
+        walk(ours_side, px, r.qty, 0, false, true);
+        const Qty taken = cands_.empty() ? 0 : allocate(r.qty, ts, FillCause::BookCross, px, pf, out);
+        if (taken > 0) {
+            // Those lots of the incoming order traded on arrival and never rested.
+            shrunk_[r.id] = true;
+            book_.modify(r.id, r.qty - taken);
+        }
+        return;
+    }
     cands_.clear();
     for (const auto& [id, o] : ours_) {
         if (o.req.side != ours_side) continue;
         const bool crossed = (ours_side == Side::Bid) ? o.req.price >= px : o.req.price <= px;
         if (crossed) cands_.push_back({id, o.req.price, static_cast<size_t>(book_.queue_ahead(syn(id)))});
     }
-    if (cfg_.displace_volume) {
-        for (const auto& [id, ph] : phantoms_) {
-            if (ph.side != ours_side) continue;
-            const bool crossed = (ours_side == Side::Bid) ? ph.price >= px : ph.price <= px;
-            if (crossed) cands_.push_back({0, ph.price, static_cast<size_t>(book_.queue_ahead(id)), id});
-        }
-    }
     if (cands_.empty()) return;
     std::sort(cands_.begin(), cands_.end(), [&](const Cand& a, const Cand& b) {
         if (a.price != b.price) return ours_side == Side::Bid ? a.price > b.price : a.price < b.price;
         return a.rank < b.rank;
     });
-    const Qty taken = allocate(r.qty, ts, FillCause::BookCross, px, pf, out);
-    if (cfg_.displace_volume && taken > 0) {
-        // Those lots of the incoming order traded on arrival and never rested.
-        shrunk_[r.id] = true;
-        book_.modify(r.id, r.qty - taken);
-    }
+    allocate(r.qty, ts, FillCause::BookCross, px, pf, out);
 }
 
 Qty L3ExchangeSim::allocate(Qty qty, Timestamp ts, FillCause cause_at, Price at_price, Portfolio& pf,
@@ -286,9 +319,9 @@ Qty L3ExchangeSim::allocate(Qty qty, Timestamp ts, FillCause cause_at, Price at_
         if (remaining <= 0) break;
         if (c.phantom) {
             const L3Book::Order* o = book_.find(c.phantom);
-            if (!o) { phantoms_.erase(c.phantom); continue; }
+            if (!o) { erase_phantom(c.phantom); continue; }
             const Qty f = book_.execute(c.phantom, remaining);
-            if (!book_.contains(c.phantom)) phantoms_.erase(c.phantom);
+            if (!book_.contains(c.phantom)) erase_phantom(c.phantom);
             displaced_absorbed_ += f;
             remaining -= f;
             continue;

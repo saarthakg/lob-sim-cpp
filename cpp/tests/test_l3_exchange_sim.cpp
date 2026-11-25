@@ -279,3 +279,19 @@ TEST_CASE("L3 exchange: fill_on_cross = false fills on prints only", "[l3ex]") {
     g.push(L3Type::Trade, 1, Side::Ask, 99, 10);   // a real sale through our price
     REQUIRE(g.filled() == 10);
 }
+
+TEST_CASE("Displacement: hidden prints reach displaced size, then us, but stop at a real displayed order", "[l3ex][impact]") {
+    Rig g(displacing());
+    g.push(L3Type::Add, 9, Side::Ask, 102, 500);
+    g.order(1, Side::Bid, 100, 30);
+    g.push(L3Type::Add, 1, Side::Bid, 100, 30);
+    g.push(L3Type::Trade, 1, Side::Ask, 100, 30);
+    g.push(L3Type::Delete, 1, Side::Bid, 100, 0);     // 30 displaced at the front
+    g.order(2, Side::Bid, 100, 10);
+    g.push(L3Type::Add, 2, Side::Bid, 100, 50);       // real order
+    g.order(3, Side::Bid, 100, 10);                   // ours, behind it
+    g.push(L3Type::Trade, 0, Side::Ask, 100, 60);     // hidden: 30 displaced, 10 to order 2, then stop
+    REQUIRE(g.ex.displaced_absorbed() == 30);
+    REQUIRE(g.filled() == 40);
+    REQUIRE(g.ex.queue_ahead(3) == 50);
+}

@@ -12,7 +12,7 @@ Nasdaq's full order feed.
 | | |
 |---|---|
 | **Speed** | Order-level (L3) book at **50M msgs/s, 18 ns p50 / 46 ns p99 per operation**, 5× a `std::map`/`std::list` book. A **full Nasdaq ITCH 5.0 day** (268.7M messages, 8,892 symbols) rebuilds every order book in 22 s of compute. **Live tick-to-trade of 8.2 µs p50 / 22 µs p99** on Bybit's real-time feed (WebSocket thread → lock-free ring → engine). |
-| **Fidelity** | On order-level data, simulated orders sit in the **real FIFO queue**: against 19,034 real Nasdaq orders, **0 impossible and 0 missed fills**, and 0.996 accuracy against independent Bitstamp ground truth. On L2-only data a queue model is used instead, and its errors are measured on the same orders (9.8% of fills jump a queue that stayed put). Feed, order-entry and response latency are modelled separately, so stale quotes really do get picked off. |
+| **Fidelity** | On order-level data, simulated orders sit in the **real FIFO queue**: against 288,295 real Nasdaq orders, **0 impossible fills and no unexplained misses**, and 0.996 accuracy against independent Bitstamp ground truth. On L2-only data a queue model is used instead, and its errors are measured on the same orders (4.5% of fills jump a queue that stayed put). Feed, order-entry and response latency are modelled separately, so stale quotes really do get picked off. |
 | **Rigour** | Walk-forward parameter selection; 16 out-of-sample days; sensitivity sweeps over latency, queue model and fill rule; and two **pre-registered** confirmation tests (30 untouched Bybit days, 8 Nasdaq days from 2025-26). CI on GCC, Clang and AppleClang, with ASan/UBSan, TSan and fuzzing jobs. |
 
 **What the platform found** ([Results](#results)):
@@ -70,7 +70,7 @@ Nasdaq's full order feed.
 # build (macOS: if the system CLT is broken, use Homebrew LLVM — see docs/architecture.md)
 cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
 cmake --build build -j
-./build/lob_tests                                   # 104 test cases
+./build/lob_tests                                   # 115 test cases
 
 # data: one day of Bybit BTCUSDT book (~200 MB) + trades (~12 MB)
 python3 -m venv python/.venv && python/.venv/bin/python -m pip install -r python/requirements.txt
@@ -171,19 +171,22 @@ before the real maker. Scored against the independent L3 ground truth
 | Log queue model | 0.392 | 0.889 | 0.747 |
 
 **Checked against real Nasdaq orders.** A real order's fate is in the feed, so
-it can referee the simulator. For 19,034 real displayed orders across 14
-stocks, a one-share simulated clone is placed right behind the real one.
+it can referee the simulator. For 288,295 real displayed orders (14 stocks, 9
+days in 2019 and 2025-26), a one-share simulated clone is placed right behind the real one.
 Price-time priority then brackets the clone's fill: never before the order
 ahead finished, never after the next order behind it traded. The bounds are
 computed in Python from the raw records, independently of the C++ book
 ([results/itch/CLONE_VALIDATION.md](results/itch/CLONE_VALIDATION.md)).
 
-| Model (same market, 2019-12-30) | Impossible fills (jumped the queue) | Missed fills |
+| Model (same market) | Impossible fills (jumped the queue) | Missed fills |
 |---|---|---|
-| **Exact-queue L3 exchange** | **0 of 19,034** | **0 of 4,146** |
-| L2 Power-2 (default) | 1,873 (9.8%) | 93 (2.2%) |
-| L2 RiskAverse | 88 (0.5%) | 781 (18.8%) |
-| L2 Log | 3,113 (16.4%) | 136 (3.3%) |
+| **Exact-queue L3 exchange** | **0 of 288,295** | **2 of 79,713** (see below) |
+| L2 Power-2 (default) | 13,096 (4.5%) | 1,400 (1.8%) |
+| L2 RiskAverse | 735 (0.3%) | 11,410 (14.3%) |
+| L2 Log | 20,947 (7.3%) | 3,264 (4.1%) |
+
+Both "misses" are the test competing with itself: a one-share print went to
+another clone at a better price, as price priority requires.
 
 The clones follow orders that were *not* cancelled, so the L2 rows show how
 often a model jumps a queue that really stayed in place. They are not

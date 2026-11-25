@@ -88,6 +88,10 @@ public:
     template <typename F>
     void for_each_in_level(Side s, Price p, F&& f) const;
 
+    // Same, while f(const Order&) returns true.
+    template <typename F>
+    void for_each_in_level_while(Side s, Price p, F&& f) const;
+
     void clear();
 
 private:
@@ -139,4 +143,12 @@ void L3Book::for_each_in_level(Side s, Price p, F&& f) const {
     const uint32_t li = ladder(s).find(p);
     if (li == PriceLadder::NIL) return;
     for (uint32_t oi = levels_[li].head; oi != NIL; oi = orders_[oi].next) f(orders_[oi]);
+}
+
+template <typename F>
+void L3Book::for_each_in_level_while(Side s, Price p, F&& f) const {
+    const uint32_t li = ladder(s).find(p);
+    if (li == PriceLadder::NIL) return;
+    for (uint32_t oi = levels_[li].head; oi != NIL; oi = orders_[oi].next)
+        if (!f(orders_[oi])) return;
 }
