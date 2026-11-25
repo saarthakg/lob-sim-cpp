@@ -28,6 +28,7 @@ import gzip
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -68,17 +69,21 @@ def bounds(r: np.ndarray, n: int, seed: int) -> pd.DataFrame:
     adds = np.flatnonzero((typ == ADD) & (tod > 35_100_000_000) & (tod < 56_000_000_000))
     adds = adds[np.isin(r["id"][adds], done.index.values)]
     pick = np.sort(np.random.default_rng(seed).choice(adds, size=min(n, len(adds)), replace=False))
-    # Adds per (side, price), to find the next one behind the clone.
-    by_level = {}
-    for i in np.flatnonzero(typ == ADD):
-        by_level.setdefault((r["side"][i], r["price"][i]), []).append(i)
-    by_level = {k: np.array(v) for k, v in by_level.items()}
+    # Adds per (side, price) for the sampled levels only, to find the next one
+    # behind the clone (a full day of QQQ has 13M adds).
+    key = r["price"] * 2 + r["side"]
+    all_adds = np.flatnonzero(typ == ADD)
+    all_adds = all_adds[np.isin(key[all_adds], np.unique(key[pick]))]
+    order = np.argsort(key[all_adds], kind="stable")   # stable: feed order within a level
+    all_adds, keys = all_adds[order], key[all_adds][order]
+    cuts = np.flatnonzero(np.diff(keys)) + 1
+    by_level = {int(keys[g[0]]): all_adds[g] for g in np.split(np.arange(len(keys)), cuts) if len(g)}
     rows, busy = [], {}
     for i in pick:
         # One clone per level at a time: two would share a small print, and the
         # second would look "late" for a reason that isn't queue priority.
-        key = (r["side"][i], r["price"][i])
-        if ts[i] < busy.get(key, 0):
+        lk = int(key[i])
+        if ts[i] < busy.get(lk, 0):
             continue
         probe_ts = ts[i] + 1
         j = np.searchsorted(ts, probe_ts)              # event the clone reacts to
@@ -87,10 +92,10 @@ def bounds(r: np.ndarray, n: int, seed: int) -> pd.DataFrame:
         place = np.searchsorted(ts, ts[j], side="right") - 1   # it arrives after that microsecond's events
         if done[r["id"][i]] <= ts[j]:
             continue                                   # R1 already gone: nothing to queue behind
-        lvl = by_level[(r["side"][i], r["price"][i])]
+        lvl = by_level[lk]
         k = np.searchsorted(lvl, place, side="right")
         r2 = first_trade.get((r["id"][lvl[k]], r["price"][i]), np.nan) if k < len(lvl) else np.nan
-        busy[key] = done[r["id"][i]] + 60_000_000
+        busy[lk] = done[r["id"][i]] + 60_000_000
         rows.append((len(rows), r["side"][i], r["price"][i], probe_ts, done[r["id"][i]], r2))
     return pd.DataFrame(rows, columns=["probe", "side", "price", "ts", "r1_done", "r2_first"])
 
@@ -113,25 +118,35 @@ def simulate(path: Path, b: pd.DataFrame, args: list, tmp: Path) -> pd.Series:
     return b.probe.map(res)
 
 
+def one_file(f: Path, n: int) -> list:
+    sym, day = f.name.split("_")[1].split(".")[0], f.name[:10]
+    b = bounds(load(f), n, seed=7)
+    rows = []
+    with tempfile.TemporaryDirectory() as t:
+        for model, args in MODELS.items():
+            fill = simulate(f, b, args, Path(t))
+            have2 = b.r2_first.notna()
+            rows.append({"day": day, "symbol": sym, "model": model, "clones": len(b), "with_r2": int(have2.sum()),
+                         "early": int((fill < b.r1_done).sum()), "late": int((have2 & ~(fill <= b.r2_first)).sum()),
+                         "filled": int(fill.notna().sum())})
+    return rows
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--files", nargs="+", required=True)
     ap.add_argument("--n", type=int, default=2000, help="clones per file")
+    ap.add_argument("--bin", default=str(BIN))
+    ap.add_argument("--jobs", type=int, default=3)
     ap.add_argument("--out", default=str(ROOT / "results" / "itch"))
     a = ap.parse_args()
+    global BIN
+    BIN = Path(a.bin)
     rows = []
-    for f in map(Path, a.files):
-        sym, day = f.name.split("_")[1].split(".")[0], f.name[:10]
-        b = bounds(load(f), a.n, seed=7)
-        with tempfile.TemporaryDirectory() as t:
-            for model, args in MODELS.items():
-                fill = simulate(f, b, args, Path(t))
-                early = (fill < b.r1_done).sum()
-                have2 = b.r2_first.notna()
-                late = (have2 & ~(fill <= b.r2_first)).sum()
-                rows.append({"day": day, "symbol": sym, "model": model, "clones": len(b), "with_r2": int(have2.sum()),
-                             "early": int(early), "late": int(late), "filled": int(fill.notna().sum())})
-                print(rows[-1], flush=True)
+    with ThreadPoolExecutor(a.jobs) as ex:
+        for res in ex.map(lambda f: one_file(Path(f), a.n), a.files):
+            rows += res
+            print(res[0]["day"], res[0]["symbol"], {x["model"]: (x["early"], x["late"]) for x in res}, flush=True)
     df = pd.DataFrame(rows)
     g = df.groupby("model", sort=False)[["clones", "with_r2", "early", "late", "filled"]].sum()
     md = ["# Queue priority against real Nasdaq orders\n", "\n\n".join((__doc__ or "").split("\n\n")[1:5]).strip() + "\n",
