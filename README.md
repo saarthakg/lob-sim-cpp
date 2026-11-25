@@ -633,7 +633,8 @@ fitted. 5 ms each-way latency, VIP0 fees
 ![Execution savings](docs/plots/execution_savings.png)
 
 - **Every passive algorithm beat crossing on every one of the 50 days, on every
-  symbol, under every fill assumption.** Day-clustered t-statistics are 27 to 103.
+  symbol,** and pegging did so under every fill assumption tested. Day-clustered
+  t-statistics are 27 to 103.
 - **Pegging is best**: follow the touch, then sweep what is left at the end of
   the slot. It fills 74-93% passively.
 - **The imbalance signal did not help execution.** Crossing early when the book
