@@ -7,13 +7,9 @@
 #include "../include/marketdata/event_source.hpp"
 #include "../include/marketdata/parser.hpp"
 #include "../include/sim/backtester.hpp"
-#include "../include/strategy/execution_strategy.hpp"
-#include "../include/strategy/glft_market_maker.hpp"
-#include "../include/strategy/imbalance_strategy.hpp"
-#include "../include/strategy/ladder_market_maker.hpp"
-#include "../include/strategy/naive_market_maker.hpp"
-#include "../include/strategy/probe_strategy.hpp"
+#include "../include/strategy/run_setup.hpp"
 #include "../include/strategy/twap_strategy.hpp"
+#include "../include/util/options.hpp"
 #include "../include/util/timer.hpp"
 #include "live_capture.hpp"
 
@@ -28,7 +24,6 @@
 #include <iostream>
 #include <map>
 #include <memory>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -128,93 +123,6 @@ Output
 )";
 }
 
-struct Args {
-    std::map<std::string, std::string> kv;
-    std::map<std::string, bool> flags;
-    bool has(const std::string& k) const { return kv.count(k) || flags.count(k); }
-    std::string str(const std::string& k, const std::string& d = "") const {
-        auto it = kv.find(k);
-        return it == kv.end() ? d : it->second;
-    }
-    double num(const std::string& k, double d) const {
-        auto it = kv.find(k);
-        if (it == kv.end()) return d;
-        size_t used = 0;
-        double v = 0;
-        try { v = std::stod(it->second, &used); } catch (const std::exception&) { used = 0; }
-        if (used == 0 || used != it->second.size()) throw std::runtime_error(k + ": not a number: " + it->second);
-        return v;
-    }
-};
-
-// Every option the program understands. Anything else is an error: a typo
-// must not silently run an experiment with the default value.
-static const std::set<std::string> kFlags = {
-    "--no-cross-fill", "--no-fee-in-quotes", "--calib-log", "--passive", "--quiet", "--no-book-metrics",
-    "--quote-on-book", "--summary-only", "--consume-prints", "--measure-latency", "--help", "-h"};
-static const std::set<std::string> kOptions = {
-    // modes
-    "--replay", "--stats", "--live", "--live-capture", "--load-snapshot", "--convert-bitstamp-l3", "--replay-itch",
-    "--extract-itch", "--replay-l3",
-    // data
-    "--trades", "--symbol", "--symbols", "--date", "--snapshot-time", "--end-time", "--exchange", "--duration-minutes",
-    "--minutes", "--depth", "--tick-size", "--lot-size", "--output", "--sample-ms",
-    // exchange and latency
-    "--maker-fee-bps", "--taker-fee-bps", "--maker-fee-per-unit", "--taker-fee-per-unit", "--session-start",
-    "--session-end", "--queue", "--queue-power", "--exchange-model", "--impact", "--impact-ttl-ms", "--latency-us",
-    "--feed-latency-us", "--entry-latency-us", "--response-latency-us", "--jitter",
-    // strategy
-    "--strategy", "--order-size", "--max-position", "--gamma", "--levels", "--half-spread-mult", "--skew-mult",
-    "--alpha-micro", "--alpha-obi", "--alpha-scale", "--obi-band-bps", "--min-half-spread-ticks", "--warmup-s",
-    "--max-depth-ticks", "--depletion-pull", "--pull-threshold", "--join-threshold", "--inventory-skew", "--max-spread-ticks",
-    "--offset-ticks", "--threshold", "--hold-ms", "--algo", "--horizon-s", "--gap-s", "--cross-imbalance", "--side", "--slices", "--interval-s", "--probes"};
-
-static size_t edit_distance(const std::string& a, const std::string& b) {
-    std::vector<size_t> row(b.size() + 1);
-    for (size_t j = 0; j <= b.size(); ++j) row[j] = j;
-    for (size_t i = 1; i <= a.size(); ++i) {
-        size_t diag = row[0];
-        row[0] = i;
-        for (size_t j = 1; j <= b.size(); ++j) {
-            const size_t up = row[j];
-            row[j] = std::min({up + 1, row[j - 1] + 1, diag + (a[i - 1] != b[j - 1])});
-            diag = up;
-        }
-    }
-    return row[b.size()];
-}
-
-static Args parse_args(int argc, char** argv) {
-    Args a;
-    for (int i = 1; i < argc; ++i) {
-        const std::string k = argv[i];
-        if (kFlags.count(k)) { a.flags[k] = true; continue; }
-        if (kOptions.count(k)) {
-            if (i + 1 >= argc) throw std::runtime_error(k + " needs a value");
-            a.kv[k] = argv[++i];
-            continue;
-        }
-        std::string best;
-        size_t best_d = 4;   // suggest only near misses
-        for (const auto* set : {&kFlags, &kOptions})
-            for (const auto& o : *set)
-                if (size_t d = edit_distance(k, o); d < best_d) { best_d = d; best = o; }
-        throw std::runtime_error("unknown option " + k + (best.empty() ? "" : " (did you mean " + best + "?)"));
-    }
-    return a;
-}
-
-// Pick from a fixed set of names, so a typo in a *value* is an error too.
-template <typename T>
-static T choose(const Args& a, const std::string& key, const std::string& dflt,
-                const std::map<std::string, T>& options) {
-    auto it = options.find(a.str(key, dflt));
-    if (it != options.end()) return it->second;
-    std::string list;
-    for (const auto& [name, v] : options) { (void)v; list += (list.empty() ? "" : "|") + name; }
-    throw std::runtime_error(key + " must be one of " + list + ", not " + a.str(key));
-}
-
 static std::string default_output_dir() {
     std::time_t t = std::time(nullptr);
     char buf[64];
@@ -222,28 +130,9 @@ static std::string default_output_dir() {
     return buf;
 }
 
-static std::vector<std::string> split_list(const std::string& list) {
-    std::vector<std::string> out;
-    for (size_t st = 0;;) {
-        const size_t c = list.find(',', st);
-        std::string item = list.substr(st, c == std::string::npos ? std::string::npos : c - st);
-        if (!item.empty()) out.push_back(std::move(item));
-        if (c == std::string::npos) return out;
-        st = c + 1;
-    }
-}
-
-// HH:MM:SS → nanoseconds since midnight.
-static uint64_t time_of_day_ns(const std::string& hms) {
-    unsigned h = 0, m = 0, s = 0;
-    if (std::sscanf(hms.c_str(), "%2u:%2u:%2u", &h, &m, &s) != 3 || h > 24 || m > 59 || s > 59)
-        throw std::runtime_error("bad time (want HH:MM:SS): " + hms);
-    return (h * 3600ULL + m * 60ULL + s) * 1'000'000'000ULL;
-}
-
 // ── --stats ──────────────────────────────────────────────────────────────────
 
-static int run_stats(EventSource& src, const Args& a) {
+static int run_stats(EventSource& src, const Options& a) {
     const Instrument& inst = src.instrument();
     OrderBook book;
     MarketEvent ev;
@@ -312,101 +201,6 @@ static int run_stats(EventSource& src, const Args& a) {
 
 // ── --replay ─────────────────────────────────────────────────────────────────
 
-static std::unique_ptr<Strategy> make_strategy(const std::string& name, const Args& a,
-                                               const Instrument& inst, Qty order_qty, Qty max_pos,
-                                               const std::string& out_dir) {
-    if (name == "glft") {
-        GlftMarketMaker::Config c;
-        c.order_qty        = order_qty;
-        c.max_position     = max_pos;
-        c.gamma            = a.num("--gamma", c.gamma);
-        c.levels           = static_cast<int>(a.num("--levels", c.levels));
-        c.half_spread_mult = a.num("--half-spread-mult", c.half_spread_mult);
-        c.skew_mult        = a.num("--skew-mult", c.skew_mult);
-        c.alpha_micro      = a.num("--alpha-micro", c.alpha_micro);
-        c.alpha_obi        = a.num("--alpha-obi", c.alpha_obi);
-        c.obi_band_bps     = a.num("--obi-band-bps", c.obi_band_bps);
-        // Scales a fitted (micro, obi) pair together — handy for sweeps.
-        c.alpha_micro     *= a.num("--alpha-scale", 1.0);
-        c.alpha_obi       *= a.num("--alpha-scale", 1.0);
-        c.min_half_spread_ticks = a.num("--min-half-spread-ticks", c.min_half_spread_ticks);
-        c.include_fee      = !a.has("--no-fee-in-quotes");
-        c.warmup_us        = static_cast<int64_t>(a.num("--warmup-s", 600) * 1e6);
-        c.max_depth_ticks  = static_cast<int>(a.num("--max-depth-ticks", c.max_depth_ticks));
-        c.depletion_pull   = a.num("--depletion-pull", 0.0);
-        c.quote_on_book    = a.has("--quote-on-book");
-        if (a.has("--calib-log") && !out_dir.empty()) c.log_path = out_dir + "/calibration.csv";
-        return std::make_unique<GlftMarketMaker>(c);
-    }
-    if (name == "ladder") {
-        LadderMarketMaker::Config c;
-        c.order_qty      = order_qty;
-        c.max_position   = max_pos;
-        c.levels         = static_cast<int>(a.num("--levels", c.levels));
-        c.alpha_micro    = a.num("--alpha-micro", 0.0) * a.num("--alpha-scale", 1.0);
-        c.alpha_obi      = a.num("--alpha-obi", 0.0) * a.num("--alpha-scale", 1.0);
-        c.obi_band_bps   = a.num("--obi-band-bps", c.obi_band_bps);
-        c.pull_threshold = a.num("--pull-threshold", c.pull_threshold);
-        c.join_threshold = a.num("--join-threshold", c.join_threshold);
-        c.inventory_skew = a.num("--inventory-skew", c.inventory_skew);
-        c.max_spread_ticks = static_cast<int>(a.num("--max-spread-ticks", c.max_spread_ticks));
-        c.depletion_pull = a.num("--depletion-pull", c.depletion_pull);
-        if (a.has("--quote-on-book")) c.interval_us = 0;
-        return std::make_unique<LadderMarketMaker>(c);
-    }
-    if (name == "naive" || name == "mm") {
-        NaiveMarketMaker::Config c;
-        c.order_qty    = order_qty;
-        c.max_position = max_pos;
-        c.offset_ticks = static_cast<int>(a.num("--offset-ticks", 0));
-        if (a.has("--quote-on-book")) c.quote_interval_us = 0;
-        return std::make_unique<NaiveMarketMaker>(c);
-    }
-    if (name == "imbalance") {
-        ImbalanceStrategy::Config c;
-        c.order_qty = order_qty;
-        c.threshold = a.num("--threshold", c.threshold);
-        c.hold_us   = static_cast<int64_t>(a.num("--hold-ms", 5000) * 1000);
-        return std::make_unique<ImbalanceStrategy>(c);
-    }
-    if (name == "probe") {
-        // Fill-model validation; see python/analysis/queue_model_validation.py.
-        Side side = choose<Side>(a, "--side", "buy", {{"buy", Side::Bid}, {"sell", Side::Ask}});
-        return std::make_unique<ProbeStrategy>(a.str("--probes"), side, inst,
-                                               out_dir.empty() ? "" : out_dir + "/probe_orders.csv");
-    }
-    if (name == "exec") {
-        ExecutionStrategy::Config c;
-        c.algo = choose<ExecutionStrategy::Algo>(a, "--algo", "cross",
-            {{"cross", ExecutionStrategy::Algo::Cross}, {"join", ExecutionStrategy::Algo::Join},
-             {"peg", ExecutionStrategy::Algo::Peg}, {"smart", ExecutionStrategy::Algo::Smart}});
-        c.slices          = static_cast<int>(a.num("--slices", c.slices));
-        c.parent_qty      = order_qty * c.slices;
-        c.horizon_us      = static_cast<int64_t>(a.num("--horizon-s", 300) * 1e6);
-        c.gap_us          = static_cast<int64_t>(a.num("--gap-s", 60) * 1e6);
-        c.cross_imbalance = a.num("--cross-imbalance", c.cross_imbalance);
-        if (!out_dir.empty()) c.csv_path = out_dir + "/executions.csv";
-        return std::make_unique<ExecutionStrategy>(c);
-    }
-    if (name == "twap") {
-        TwapStrategy::Config c;
-        c.side        = choose<Side>(a, "--side", "buy", {{"buy", Side::Bid}, {"sell", Side::Ask}});
-        c.num_slices  = static_cast<int>(a.num("--slices", 20));
-        c.total_qty   = order_qty * c.num_slices;
-        c.interval_us = static_cast<int64_t>(a.num("--interval-s", 60) * 1e6);
-        c.passive     = a.has("--passive");
-        return std::make_unique<TwapStrategy>(c);
-    }
-    (void)inst;
-    return nullptr;
-}
-
-// Records book_metrics only.
-class NullStrategy : public Strategy {
-public:
-    std::string name() const override { return "None"; }
-};
-
 static std::atomic<LiveBybitSource*> g_live{nullptr};
 static void live_sigint(int) {
     if (LiveBybitSource* s = g_live.load()) s->stop();
@@ -418,64 +212,18 @@ static void print_latency(const char* name, const RunSummary::Pctl& p) {
                 p.n, p.p50 / 1e3, p.p90 / 1e3, p.p99 / 1e3, p.p999 / 1e3, p.max / 1e3);
 }
 
-static int run_replay(EventSource& src, const Args& a) {
+static int run_replay(EventSource& src, const Options& a) {
     const Instrument& inst = src.instrument();
     const std::string strat_name = a.str("--strategy", "");
     std::string out = a.str("--output", "");
     if (out.empty()) out = default_output_dir();
 
-    BacktestConfig cfg;
-    cfg.output_dir = out;
-    cfg.quiet      = a.has("--quiet");
-    cfg.sample_us  = static_cast<int64_t>(a.num("--sample-ms", 1000) * 1000);
-    cfg.write_book_metrics = !a.has("--no-book-metrics");
-    cfg.summary_only       = a.has("--summary-only");
-    cfg.measure_latency    = a.has("--measure-latency");
-    cfg.exchange.fees.maker = a.num("--maker-fee-bps", 2.0) * 1e-4;
-    cfg.exchange.fees.taker = a.num("--taker-fee-bps", 5.5) * 1e-4;
-    cfg.exchange.fees.maker_per_unit = a.num("--maker-fee-per-unit", 0.0);
-    cfg.exchange.fees.taker_per_unit = a.num("--taker-fee-per-unit", 0.0);
-    if (a.has("--maker-fee-per-unit") && !a.has("--maker-fee-bps")) cfg.exchange.fees.maker = 0.0;
-    if (a.has("--taker-fee-per-unit") && !a.has("--taker-fee-bps")) cfg.exchange.fees.taker = 0.0;
-    if (a.has("--session-start")) cfg.session_start_us = static_cast<int64_t>(time_of_day_ns(a.str("--session-start")) / 1000);
-    if (a.has("--session-end")) cfg.session_end_us = static_cast<int64_t>(time_of_day_ns(a.str("--session-end")) / 1000);
-    for (const auto& [k, v] : a.kv) cfg.run_config[k] = v;
-    for (const auto& [k, v] : a.flags) if (v) cfg.run_config[k] = "true";
-    const std::string q = a.str("--queue", "power");
-    cfg.exchange.queue.kind = choose<QueueModel::Kind>(a, "--queue", "power",
-        {{"riskaverse", QueueModel::Kind::RiskAverse}, {"log", QueueModel::Kind::ProbLog}, {"power", QueueModel::Kind::ProbPower}});
-    cfg.exchange.queue.power  = a.num("--queue-power", 2.0);
-    cfg.exchange.consume_prints = a.has("--consume-prints");
-    cfg.exchange.displace_volume = choose<bool>(a, "--impact", "none", {{"none", false}, {"displace", true}});
-    cfg.exchange.displaced_ttl_us = static_cast<int64_t>(a.num("--impact-ttl-ms", 0) * 1000);
-    cfg.exchange.fill_on_cross = !a.has("--no-cross-fill");
-    cfg.exchange_model = choose<ExchangeModel>(a, "--exchange-model", "auto",
-        {{"auto", ExchangeModel::Auto}, {"l2", ExchangeModel::L2Queue}, {"l3", ExchangeModel::L3Exact}});
-    int64_t lat = static_cast<int64_t>(a.num("--latency-us", 0));
-    cfg.latency.feed_us      = static_cast<int64_t>(a.num("--feed-latency-us", static_cast<double>(lat)));
-    cfg.latency.entry_us     = static_cast<int64_t>(a.num("--entry-latency-us", static_cast<double>(lat)));
-    cfg.latency.response_us  = static_cast<int64_t>(a.num("--response-latency-us", static_cast<double>(lat)));
-    cfg.latency.jitter_sigma = a.num("--jitter", 0.0);
-
-    Qty order_qty = std::max<Qty>(1, inst.to_lots(a.num("--order-size", inst.lot_size)));
-    Qty max_pos   = std::max<Qty>(order_qty, inst.to_lots(a.num("--max-position", 10 * inst.qty(order_qty))));
-    int levels    = static_cast<int>(a.num("--levels", 1));
-    // Gateway limit: strategy limit plus room for a full ladder of resting orders.
-    cfg.max_position = max_pos + order_qty * levels;
-    if (strat_name == "probe") cfg.max_position = 0;  // probes accumulate by design
-    // An execution algo's parent quantity *is* its position limit.
-    if (strat_name == "exec") cfg.max_position = 0;   // parents alternate sides; bounded by construction
-    if (strat_name == "twap")
-        cfg.max_position = order_qty * static_cast<Qty>(a.num("--slices", 20));
-
+    const RunSetup rs = make_run_setup(a, inst, strat_name, out);
+    const BacktestConfig& cfg = rs.cfg;
+    const Qty order_qty = rs.order_qty, max_pos = rs.max_pos;
     std::unique_ptr<Strategy> strat;
-    if (strat_name.empty() || strat_name == "none") {
-        strat = std::make_unique<NullStrategy>();
-    } else {
-        std::filesystem::create_directories(out);
-        strat = make_strategy(strat_name, a, inst, order_qty, max_pos, out);
-        if (!strat) { std::cerr << "Unknown strategy: " << strat_name << "\n"; return 1; }
-    }
+    if (!strat_name.empty() && strat_name != "none") std::filesystem::create_directories(out);
+    strat = make_strategy(strat_name, a, inst, order_qty, max_pos, out);
 
     if (!cfg.quiet) {
         std::printf("Instrument %s tick=%g lot=%g | strategy=%s order=%g max_pos=%g | fees maker=%.2fbp taker=%.2fbp | "
@@ -486,7 +234,7 @@ static int run_replay(EventSource& src, const Args& a) {
                     (long long)cfg.latency.entry_us, (long long)cfg.latency.response_us,
                     (cfg.exchange_model == ExchangeModel::L3Exact ||
                      (cfg.exchange_model == ExchangeModel::Auto && src.has_l3())) ? "L3-exact" : "L2-model",
-                    q.c_str(),
+                    a.str("--queue", "power").c_str(),
                     src.has_trades() ? "" : " | NO TRADES: fills from book crosses only");
     }
 
@@ -630,7 +378,7 @@ struct ItchSnapshotter : itch::HandlerBase {
 };
 }  // namespace
 
-static int run_replay_itch(const std::string& path, const Args& a) {
+static int run_replay_itch(const std::string& path, const Options& a) {
     ItchBookBuilder builder;
     ItchSnapshotter snap(builder);
     if (a.has("--snapshot-time")) {
@@ -680,7 +428,7 @@ static int run_replay_itch(const std::string& path, const Args& a) {
     return 0;
 }
 
-static int run_extract_itch(const std::string& path, const Args& a) {
+static int run_extract_itch(const std::string& path, const Options& a) {
     const std::string date = a.str("--date"), out = a.str("--output");
     const auto symbols = split_list(a.str("--symbols"));
     if (date.empty() || out.empty() || symbols.empty()) {
@@ -746,7 +494,7 @@ static void run_load_snapshot(const std::string& path) {
 int main(int argc, char** argv) {
     if (argc < 2) { print_help(); return 0; }
     try {
-        const Args a = parse_args(argc, argv);
+        const Options a = Options::parse(argc, argv);
         if (a.has("--help") || a.has("-h")) { print_help(); return 0; }
         if (a.has("--load-snapshot")) { run_load_snapshot(a.str("--load-snapshot")); return 0; }
         if (a.has("--convert-bitstamp-l3")) {
