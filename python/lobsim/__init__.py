@@ -22,8 +22,8 @@
     lobsim.backtest("day.l3bin.gz", Join(), latency_us=50)
 
 An unknown option is an error, never ignored. Built-in strategies release the
-GIL, so a thread pool runs them in parallel. Python strategies cost roughly a
-microsecond per callback.
+GIL, so a thread pool runs them in parallel. Python strategies cost a few
+microseconds per callback.
 """
 import json
 from dataclasses import dataclass, field

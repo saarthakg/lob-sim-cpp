@@ -88,3 +88,24 @@ jobs:
           mkdir -p new_itch new_bybit
           ./build/fuzz_itch  -max_total_time=60 -max_len=4096 new_itch  cpp/fuzz/corpus/itch
           ./build/fuzz_bybit -max_total_time=60 -max_len=4096 new_bybit cpp/fuzz/corpus/bybit
+
+  python:
+    name: python-${{ matrix.python }}-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, python: "3.9" }
+          - { os: ubuntu-24.04, python: "3.13" }
+          - { os: macos-15, python: "3.13" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: pip install . pytest
+      - name: Test
+        # From outside the checkout's python/ directory, so the installed package is what gets tested.
+        run: python -m pytest -q python/tests

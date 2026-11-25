@@ -32,7 +32,9 @@ InputFile::InputFile(const std::string& path) : path_(path) {
         return;
     }
     std::fclose(f);
-    fp_   = ::popen(((gz ? "gzip -dc " : "unzip -p ") + shell_quote(path)).c_str(), "r");
+    // stderr is dropped: closing early (reading just a header) makes gzip
+    // complain about a broken pipe, and real failures are reported by finish().
+    fp_   = ::popen(((gz ? "gzip -dc " : "unzip -p ") + shell_quote(path) + " 2>/dev/null").c_str(), "r");
     pipe_ = true;
     if (!fp_) throw std::runtime_error("cannot start decompressor for " + path);
 }
