@@ -7,6 +7,7 @@
 
 #include <array>
 #include <deque>
+#include <map>
 #include <memory>
 #include <random>
 #include <string>
@@ -42,6 +43,16 @@ struct BacktestConfig {
     LatencyConfig  latency;
     Qty            max_position = 0;      // lots; 0 = no gateway position limit
     int64_t        sample_us    = 1'000'000;  // equity/book sampling interval
+    // Trading session, as microseconds since midnight of the feed's clock
+    // (-1 = unbounded). Before session_start the book is maintained but the
+    // strategy is not called. From session_end the strategy is no longer
+    // called, its orders are cancelled, and its position is closed with
+    // market orders, whose spread and fees are part of net PnL.
+    int64_t        session_start_us = -1;
+    int64_t        session_end_us   = -1;
+    // Recorded verbatim under "config" in summary.json, so a result file says
+    // what produced it.
+    std::map<std::string, std::string> run_config;
     std::string    output_dir;            // empty = no files written
     bool           write_book_metrics = true;
     bool           quiet = false;
@@ -118,7 +129,8 @@ public:
     const std::vector<FillRecord>& fills() const { return fills_; }
     const Portfolio& portfolio() const { return pf_; }
 
-    static void write_summary_json(const RunSummary& s, const std::string& path);
+    static void write_summary_json(const RunSummary& s, const std::string& path,
+                                   const std::map<std::string, std::string>& config = {});
 
 private:
     // StrategyContext
@@ -126,8 +138,12 @@ private:
     const OrderBook&  book() const override { return local_book_; }
     const Instrument& instrument() const override { return inst_; }
     Qty               position() const override { return local_pos_; }
-    double            maker_fee() const override { return cfg_.exchange.fees.maker; }
-    double            taker_fee() const override { return cfg_.exchange.fees.taker; }
+    // Fees as a fraction of notional at the current local price.
+    double            maker_fee() const override { return cfg_.exchange.fees.maker_fee(1.0, units_per_notional()); }
+    double            taker_fee() const override { return cfg_.exchange.fees.taker_fee(1.0, units_per_notional()); }
+    double            units_per_notional() const {
+        return local_book_.empty() ? 0.0 : 1.0 / (local_book_.mid_price() * inst_.tick_size);
+    }
     const std::unordered_map<OrderId, LocalOrder>& orders() const override { return local_orders_; }
     OrderId submit_limit(Side side, Price px, Qty qty, TimeInForce tif) override;
     OrderId submit_market(Side side, Qty qty) override;
@@ -191,6 +207,11 @@ private:
 
     struct Writers;
     std::unique_ptr<Writers> w_;
+
+    // Where `t` falls relative to the trading session.
+    enum class Session { Before, Open, Closed };
+    Session session(Timestamp t) const;
+    void    close_out();   // after session_end: cancel everything, then flatten
 
     int64_t jittered(int64_t base);
     void drain_until(Timestamp t, bool inclusive);

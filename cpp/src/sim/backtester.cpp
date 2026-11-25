@@ -89,10 +89,31 @@ int64_t Backtester::jittered(int64_t base) {
     return static_cast<int64_t>(static_cast<double>(base) * std::exp(n(rng_)));
 }
 
+// ── trading session ──────────────────────────────────────────────────────────
+
+Backtester::Session Backtester::session(Timestamp t) const {
+    constexpr int64_t DAY_US = 86'400'000'000LL;
+    const int64_t tod = t % DAY_US;
+    if (cfg_.session_end_us >= 0 && tod >= cfg_.session_end_us) return Session::Closed;
+    if (cfg_.session_start_us >= 0 && tod < cfg_.session_start_us) return Session::Before;
+    return Session::Open;
+}
+
+void Backtester::close_out() {
+    std::vector<OrderId> live;
+    for (const auto& [id, o] : local_orders_)
+        if (o.type == OrderType::Limit && !o.cancel_sent) live.push_back(id);
+    for (OrderId id : live) cancel(id);
+    // Wait for every order to be confirmed dead, so a late fill can't leave a
+    // position behind; a partly filled flatten is retried on the next event.
+    if (local_orders_.empty() && local_pos_ != 0 && !local_book_.empty())
+        submit_market(local_pos_ > 0 ? Side::Ask : Side::Bid, std::llabs(local_pos_));
+}
+
 // ── StrategyContext: order gateway ───────────────────────────────────────────
 
 OrderId Backtester::submit_limit(Side side, Price px, Qty qty, TimeInForce tif) {
-    if (qty <= 0 || px <= 0) { ++sum_.local_refusals; return 0; }
+    if (qty <= 0 || px <= 0 || session(local_now_) != Session::Open) { ++sum_.local_refusals; return 0; }
     Qty same_side = 0;
     for (const auto& [id, lo] : local_orders_) {
         (void)id;
@@ -106,7 +127,8 @@ OrderId Backtester::submit_limit(Side side, Price px, Qty qty, TimeInForce tif) 
     }
     if (cfg_.max_position > 0) {
         Qty worst = (side == Side::Bid) ? local_pos_ + same_side + qty : local_pos_ - same_side - qty;
-        if (std::llabs(worst) > cfg_.max_position) { ++sum_.local_refusals; return 0; }
+        // An order that only shrinks an over-limit position is always allowed.
+        if (std::llabs(worst) > std::max<Qty>(cfg_.max_position, std::llabs(local_pos_) - 1)) { ++sum_.local_refusals; return 0; }
     }
 
     OrderRequest req;
@@ -134,7 +156,7 @@ OrderId Backtester::submit_market(Side side, Qty qty) {
     if (qty <= 0) { ++sum_.local_refusals; return 0; }
     if (cfg_.max_position > 0) {
         Qty worst = local_pos_ + (side == Side::Bid ? qty : -qty);
-        if (std::llabs(worst) > cfg_.max_position) { ++sum_.local_refusals; return 0; }
+        if (std::llabs(worst) > std::max<Qty>(cfg_.max_position, std::llabs(local_pos_) - 1)) { ++sum_.local_refusals; return 0; }
     }
     OrderRequest req;
     req.order_id = next_id_++;
@@ -227,10 +249,13 @@ void Backtester::deliver_local(const MarketEvent& ev, Timestamp local_t) {
     // (after the warm-up, so the backlog queued during start-up doesn't count).
     react_ns_     = (ev.local_ns > 0 && ev.ts >= latency_from_ts_) ? ev.local_ns : 0;
     react_pop_ns_ = pop_ns_;
-    if (ev.type == EventType::Trade) {
-        strat_.on_trade(*this, ev.trade);
-    } else if (!local_book_.empty() && !local_book_.crossed()) {
-        strat_.on_book(*this);
+    switch (session(local_t)) {
+        case Session::Open:
+            if (ev.type == EventType::Trade) strat_.on_trade(*this, ev.trade);
+            else if (!local_book_.empty() && !local_book_.crossed()) strat_.on_book(*this);
+            break;
+        case Session::Closed: close_out(); break;
+        case Session::Before: break;
     }
     react_ns_ = 0;
 }
@@ -265,7 +290,8 @@ void Backtester::drain_until(Timestamp t, bool inclusive) {
         } else {
             local_now_ = next_timer_;
             next_timer_ += timer_iv;
-            if (!local_book_.empty()) strat_.on_timer(*this);
+            if (!local_book_.empty() && !local_book_.crossed() && session(local_now_) == Session::Open)
+                strat_.on_timer(*this);
         }
     }
 }
@@ -318,7 +344,7 @@ void Backtester::update_markouts() {
 }
 
 void Backtester::sample(Timestamp t) {
-    if (ex_book_.empty()) return;
+    if (ex_book_.empty() || session(t) == Session::Before) return;
     const double mid = ex_book_.mid_price();
     const double net = pf_.net_pnl(mid);
     if (samples_ == 0) peak_equity_ = net;
@@ -446,7 +472,9 @@ void Backtester::finalize() {
     sum_.final_position = pf_.position_units();
     if (!ex_book_.empty()) {
         const double half_spread = 0.5 * ex_book_.spread() * tick;
-        sum_.flatten_cost = std::fabs(sum_.final_position) * (half_spread + cfg_.exchange.fees.taker * mid * tick);
+        sum_.flatten_cost = std::fabs(sum_.final_position) * half_spread +
+                            cfg_.exchange.fees.taker_fee(std::fabs(sum_.final_position) * mid * tick,
+                                                         std::fabs(sum_.final_position));
     }
     sum_.net_pnl_flat = sum_.net_pnl - sum_.flatten_cost;
     sum_.recv_to_engine = percentiles(lat_recv_);
@@ -476,12 +504,14 @@ void Backtester::finalize() {
             fw.write_row(row);
         }
     }
-    write_summary_json(sum_, cfg_.output_dir + "/summary.json");
+    write_summary_json(sum_, cfg_.output_dir + "/summary.json", cfg_.run_config);
     if (!cfg_.quiet) std::cout << "Output written to: " << cfg_.output_dir << "\n";
 }
 
-void Backtester::write_summary_json(const RunSummary& s, const std::string& path) {
+void Backtester::write_summary_json(const RunSummary& s, const std::string& path,
+                                    const std::map<std::string, std::string>& config) {
     nlohmann::json j;
+    if (!config.empty()) j["config"] = config;
     j["strategy"] = s.strategy;
     j["symbol"]   = s.symbol;
     j["start_ts"] = s.start_ts;

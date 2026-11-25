@@ -73,7 +73,7 @@ Qty ExchangeSim::take_liquidity(const OrderRequest& req, Qty qty, Price limit, b
         Qty f = std::min(qty - filled, lvl_qty);
         if (f <= 0) return true;
         filled += f;
-        double fee = inst_.notional(px, f) * cfg_.fees.taker;
+        double fee = cfg_.fees.taker_fee(inst_.notional(px, f), inst_.qty(f));
         pf.on_fill(req.side, px, f, fee);
         ExecutionReport r = base_report(req, ts);
         r.fill_price = px;
@@ -179,7 +179,7 @@ void ExchangeSim::fill_passive(Resting& rs, Qty qty, Price px, Timestamp ts, Por
     qty = std::min(qty, rs.leaves());
     if (qty <= 0) return;
     rs.filled += qty;
-    double fee = inst_.notional(px, qty) * cfg_.fees.maker;
+    double fee = cfg_.fees.maker_fee(inst_.notional(px, qty), inst_.qty(qty));
     pf.on_fill(rs.req.side, px, qty, fee);
     ExecutionReport r = base_report(rs.req, ts);
     r.fill_price = px;

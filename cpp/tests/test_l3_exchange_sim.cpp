@@ -142,3 +142,26 @@ TEST_CASE("L3 exchange: post-only rejects and cancel races", "[l3ex]") {
     g.ex.on_cancel(2, 2, g.out);
     REQUIRE(g.out.back().status == OrderStatus::CancelRejected);
 }
+
+TEST_CASE("L3 exchange: a hidden print fills us only from the front of the queue", "[l3ex]") {
+    Rig g;
+    g.push(L3Type::Add, 1, Side::Bid, 100, 50);
+    g.push(L3Type::Add, 2, Side::Ask, 102, 50);
+    g.order(1, Side::Bid, 100, 30);
+    // Maker id 0 = executed against a non-displayed order at 100.
+    g.push(L3Type::Trade, 0, Side::Ask, 100, 20);
+    REQUIRE(g.filled() == 0);                         // order 1 is still ahead of us
+    g.push(L3Type::Delete, 1, Side::Bid, 100, 0);
+    g.push(L3Type::Trade, 0, Side::Ask, 100, 20);     // now at the front: displayed beats hidden
+    REQUIRE(g.filled() == 20);
+    g.push(L3Type::Trade, 0, Side::Ask, 99, 500);     // printed through our price
+    REQUIRE(g.filled() == 30);
+}
+
+TEST_CASE("Per-unit fees: a maker rebate in quote currency per base unit", "[l3ex]") {
+    FeeSchedule f;
+    f.maker = 0.0; f.taker = 0.0;
+    f.maker_per_unit = -0.002; f.taker_per_unit = 0.003;
+    REQUIRE(f.maker_fee(1'000'000.0, 100) == -0.2);
+    REQUIRE(f.taker_fee(1'000'000.0, 100) == 0.3);
+}

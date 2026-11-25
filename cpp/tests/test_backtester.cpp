@@ -216,3 +216,57 @@ TEST_CASE("Live latency instrumentation counts reactions, not timer or replay ev
     REQUIRE(s2.recv_to_engine.n == 0);
     REQUIRE(s2.tick_to_trade.n == 0);
 }
+
+TEST_CASE("Session window: no strategy calls outside it, and the position is flattened at the end", "[backtester]") {
+    constexpr Timestamp DAY = 86'400'000'000LL, SEC = 1'000'000LL;
+    const Timestamp day0 = 100 * DAY;
+    std::vector<MarketEvent> ev;
+    for (int s = 0; s < 20; ++s) ev.push_back(snapshot(day0 + s * SEC, 1000, 1001));
+    VectorSource src(inst(), ev);
+    Probe p;
+    p.on_book_fn = [](StrategyContext& c, int n) {
+        if (n == 0) c.submit_market(Side::Bid, 7);
+        if (n == 1) c.submit_limit(Side::Bid, 999, 5, TimeInForce::PostOnly);   // left resting
+    };
+    BacktestConfig cfg = quiet_cfg();
+    cfg.session_start_us = 5 * SEC;
+    cfg.session_end_us   = 12 * SEC;
+    cfg.latency.entry_us = 300'000;
+    cfg.latency.response_us = 300'000;
+    Backtester bt(src, p, cfg);
+    const RunSummary s = bt.run();
+    REQUIRE(p.book_times.front() == day0 + 5 * SEC);
+    REQUIRE(p.book_times.back() == day0 + 11 * SEC);
+    REQUIRE(s.final_position == 0.0);
+    REQUIRE(bt.portfolio().position() == 0);
+    REQUIRE(s.cancels_sent == 1);
+    REQUIRE(s.taker_fills == 2);
+    // Flattened only after the resting order's cancel was confirmed.
+    REQUIRE(bt.fills().back().ts == day0 + 13 * SEC + 300'000);
+}
+
+TEST_CASE("Position limit never blocks an order that only reduces an over-limit position", "[backtester]") {
+    std::vector<MarketEvent> ev;
+    for (int i = 0; i < 6; ++i) ev.push_back(snapshot(1000 + i * 1000, 1000, 1001));
+    VectorSource src(inst(), ev);
+    OrderId reduce = 0, grow = 0, flip = 0;
+    Probe p;
+    p.on_book_fn = [&](StrategyContext& c, int n) {
+        // Two in-flight market orders pass the limit individually and overshoot it together.
+        if (n == 0) { c.submit_market(Side::Bid, 10); c.submit_market(Side::Bid, 10); }
+        if (n == 2) {
+            REQUIRE(c.position() == 20);
+            grow   = c.submit_market(Side::Bid, 1);
+            flip   = c.submit_market(Side::Ask, 40);
+            reduce = c.submit_market(Side::Ask, 5);
+        }
+    };
+    BacktestConfig cfg = quiet_cfg();
+    cfg.max_position = 10;
+    Backtester bt(src, p, cfg);
+    bt.run();
+    REQUIRE(reduce != 0);
+    REQUIRE(grow == 0);
+    REQUIRE(flip == 0);
+    REQUIRE(bt.portfolio().position() == 15);
+}

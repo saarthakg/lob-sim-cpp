@@ -75,6 +75,13 @@ Instrument
 Exchange model
   --maker-fee-bps F                 default 2.0 (Bybit VIP0). Negative = rebate.
   --taker-fee-bps F                 default 5.5 (Bybit VIP0)
+  --maker-fee-per-unit F --taker-fee-per-unit F
+                                    quote currency per base unit (US equities:
+                                    $/share; negative = rebate). Replaces the bp
+                                    default for that side unless it is also given.
+  --session-start HH:MM:SS --session-end HH:MM:SS
+                                    trade only in this window of the feed's clock;
+                                    at the end cancel everything and flatten
   --queue riskaverse|power|log      cancel-attribution queue model (default power)
   --queue-power N                   exponent for --queue power (default 2)
   --exchange-model auto|l2|l3       auto: exact-queue L3 exchange on order-level
@@ -143,7 +150,8 @@ static const std::set<std::string> kOptions = {
     "--trades", "--symbol", "--symbols", "--date", "--snapshot-time", "--end-time", "--exchange", "--duration-minutes",
     "--minutes", "--depth", "--tick-size", "--lot-size", "--output", "--sample-ms",
     // exchange and latency
-    "--maker-fee-bps", "--taker-fee-bps", "--queue", "--queue-power", "--exchange-model", "--latency-us",
+    "--maker-fee-bps", "--taker-fee-bps", "--maker-fee-per-unit", "--taker-fee-per-unit", "--session-start",
+    "--session-end", "--queue", "--queue-power", "--exchange-model", "--latency-us",
     "--feed-latency-us", "--entry-latency-us", "--response-latency-us", "--jitter",
     // strategy
     "--strategy", "--order-size", "--max-position", "--gamma", "--levels", "--half-spread-mult", "--skew-mult",
@@ -202,6 +210,25 @@ static std::string default_output_dir() {
     char buf[64];
     std::strftime(buf, sizeof(buf), "data/processed/run_%Y%m%d_%H%M%S", std::localtime(&t));
     return buf;
+}
+
+static std::vector<std::string> split_list(const std::string& list) {
+    std::vector<std::string> out;
+    for (size_t st = 0;;) {
+        const size_t c = list.find(',', st);
+        std::string item = list.substr(st, c == std::string::npos ? std::string::npos : c - st);
+        if (!item.empty()) out.push_back(std::move(item));
+        if (c == std::string::npos) return out;
+        st = c + 1;
+    }
+}
+
+// HH:MM:SS → nanoseconds since midnight.
+static uint64_t time_of_day_ns(const std::string& hms) {
+    unsigned h = 0, m = 0, s = 0;
+    if (std::sscanf(hms.c_str(), "%2u:%2u:%2u", &h, &m, &s) != 3 || h > 24 || m > 59 || s > 59)
+        throw std::runtime_error("bad time (want HH:MM:SS): " + hms);
+    return (h * 3600ULL + m * 60ULL + s) * 1'000'000'000ULL;
 }
 
 // ── --stats ──────────────────────────────────────────────────────────────────
@@ -381,6 +408,14 @@ static int run_replay(EventSource& src, const Args& a) {
     cfg.measure_latency    = a.has("--measure-latency");
     cfg.exchange.fees.maker = a.num("--maker-fee-bps", 2.0) * 1e-4;
     cfg.exchange.fees.taker = a.num("--taker-fee-bps", 5.5) * 1e-4;
+    cfg.exchange.fees.maker_per_unit = a.num("--maker-fee-per-unit", 0.0);
+    cfg.exchange.fees.taker_per_unit = a.num("--taker-fee-per-unit", 0.0);
+    if (a.has("--maker-fee-per-unit") && !a.has("--maker-fee-bps")) cfg.exchange.fees.maker = 0.0;
+    if (a.has("--taker-fee-per-unit") && !a.has("--taker-fee-bps")) cfg.exchange.fees.taker = 0.0;
+    if (a.has("--session-start")) cfg.session_start_us = static_cast<int64_t>(time_of_day_ns(a.str("--session-start")) / 1000);
+    if (a.has("--session-end")) cfg.session_end_us = static_cast<int64_t>(time_of_day_ns(a.str("--session-end")) / 1000);
+    for (const auto& [k, v] : a.kv) cfg.run_config[k] = v;
+    for (const auto& [k, v] : a.flags) if (v) cfg.run_config[k] = "true";
     const std::string q = a.str("--queue", "power");
     cfg.exchange.queue.kind = choose<QueueModel::Kind>(a, "--queue", "power",
         {{"riskaverse", QueueModel::Kind::RiskAverse}, {"log", QueueModel::Kind::ProbLog}, {"power", QueueModel::Kind::ProbPower}});
@@ -513,25 +548,6 @@ static int run_replay_l3(const std::string& path) {
                 "crossed states %zu, trades with missing maker %zu\n",
                 dup_add, unknown_del, unknown_mod, crossed, trade_maker_missing);
     return 0;
-}
-
-static std::vector<std::string> split_list(const std::string& list) {
-    std::vector<std::string> out;
-    for (size_t st = 0;;) {
-        const size_t c = list.find(',', st);
-        std::string item = list.substr(st, c == std::string::npos ? std::string::npos : c - st);
-        if (!item.empty()) out.push_back(std::move(item));
-        if (c == std::string::npos) return out;
-        st = c + 1;
-    }
-}
-
-// HH:MM:SS → nanoseconds since midnight.
-static uint64_t time_of_day_ns(const std::string& hms) {
-    unsigned h = 0, m = 0, s = 0;
-    if (std::sscanf(hms.c_str(), "%2u:%2u:%2u", &h, &m, &s) != 3 || h > 24 || m > 59 || s > 59)
-        throw std::runtime_error("bad time (want HH:MM:SS): " + hms);
-    return (h * 3600ULL + m * 60ULL + s) * 1'000'000'000ULL;
 }
 
 // ── Nasdaq ITCH 5.0 replay ───────────────────────────────────────────────────

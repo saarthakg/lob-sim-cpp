@@ -3,11 +3,18 @@
 #include <unordered_map>
 #include <vector>
 
-// Fee rates as a fraction of notional. Negative = rebate.
+// Fees per fill. Negative = rebate. The fractional rates (of notional) suit
+// crypto venues; the per-unit rates (quote currency per base unit) suit US
+// equities, whose fees and rebates are per share. Both apply if both are set.
 // Defaults: Bybit USDT perpetual VIP0 (maker 0.02%, taker 0.055%).
 struct FeeSchedule {
     double maker = 0.0002;
     double taker = 0.00055;
+    double maker_per_unit = 0.0;
+    double taker_per_unit = 0.0;
+
+    double maker_fee(double notional, double units) const { return notional * maker + units * maker_per_unit; }
+    double taker_fee(double notional, double units) const { return notional * taker + units * taker_per_unit; }
 };
 
 // How the queue ahead of a resting order advances when the displayed size at

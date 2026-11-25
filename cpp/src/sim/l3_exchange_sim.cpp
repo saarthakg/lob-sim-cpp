@@ -111,7 +111,8 @@ void L3ExchangeSim::on_print(const L3Record& r, Timestamp ts, Portfolio& pf, std
     const Price P = r.price;
     const L3Book::Order* maker = book_.find(r.id);
     const bool maker_at_p = maker && maker->side == passive && maker->price == P;
-    if (!maker) ++missing_maker_;
+    const bool hidden = (r.id == 0);   // executed against a non-displayed order
+    if (!maker && !hidden) ++missing_maker_;
 
     // Rank of each order in P's FIFO, computed only if we rest at P.
     bool level_loaded = false;
@@ -130,6 +131,12 @@ void L3ExchangeSim::on_print(const L3Record& r, Timestamp ts, Portfolio& pf, std
         const bool better = (passive == Side::Bid) ? px > P : px < P;
         if (better) {
             cands_.push_back({id, px, 0});
+        } else if (px == P && hidden) {
+            // Displayed orders have priority over hidden ones at the same
+            // price, so the aggressor reaches us first — but only if no real
+            // displayed order is ahead (one that was still there would have
+            // traded instead of the hidden order).
+            if (book_.queue_ahead(syn(id)) == 0) cands_.push_back({id, px, 0});
         } else if (px == P && maker_at_p) {
             if (!level_loaded) load_level();
             const size_t rank = static_cast<size_t>(
@@ -188,7 +195,7 @@ void L3ExchangeSim::fill(Ours& o, Qty q, Timestamp ts, FillCause cause, Portfoli
     const double ahead = static_cast<double>(book_.queue_ahead(syn(req.order_id)));
     book_.execute(syn(req.order_id), q);
     o.filled += q;
-    const double fee = inst_.notional(req.price, q) * cfg_.fees.maker;
+    const double fee = cfg_.fees.maker_fee(inst_.notional(req.price, q), inst_.qty(q));
     pf.on_fill(req.side, req.price, q, fee);
 
     ExecutionReport r;
