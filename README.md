@@ -675,13 +675,15 @@ latency, Nasdaq's published per-share fees, and end-of-day flattening.
   top rebate is 0.30. That is the Glosten-Milgrom zero-profit condition, read
   off real order flow.
 - **Latency is the rest of the story.** The loss grows at every step from 0 to
-  10 ms in both periods. H4 had the predicted sign every day, but two very
-  large days inflate the variance and it misses its threshold, so it counts as
+  10 ms in both periods. H4 had the predicted sign every day, but
+  the effect was 0.04-0.22 c/share on the five December 2025 days and 1.0-1.4 on
+  the three 2026 days. That spread keeps t below its threshold, so it counts as
   unconfirmed.
 - **Filtering on imbalance backfires,** which is the one effect that clears its
   bar. A likely reason: it joins long queues at the back and gives up priority
   to cancel, so it fills mostly when a level is swept.
-- **A seven-in-eight loss is not a confirmed loss.** One day (2026-06-12) made
+- **H1 is the same kind of near miss.** Losing on seven of eight days is not a
+  confirmed loss when the sizes vary this much: one day (2026-06-12) made
   +$13.9k and one (2026-05-18) lost $90.2k.
 
 **The dollar figures are not credible, and the README does not quote a profit
