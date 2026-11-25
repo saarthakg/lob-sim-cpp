@@ -41,6 +41,12 @@ struct ExchangeConfig {
     // the only fill evidence available when no trade feed is loaded. On the L3
     // exchange: a real order arriving at a price that crosses ours fills us.
     bool fill_on_cross = true;
+    // L2 exchange only. Between two conflated book updates (100 ms on Bybit)
+    // the displayed book ignores trades that have already printed. On: prints
+    // since the last update, and our own takes, are subtracted from the
+    // displayed size — so a market order cannot trade against liquidity that
+    // is already gone, and a new passive order does not queue behind it.
+    bool consume_prints = false;
     // L3 exchange only. Off: a print that fills us also fills the real maker it
     // names (no impact: the same share trades twice). On: the shares we take
     // stay in that maker's queue position as resting size, ahead of everything
@@ -111,6 +117,17 @@ private:
     ExchangeConfig cfg_;
     std::unordered_map<OrderId, Resting> resting_;
     std::vector<OrderId> scratch_ids_;
+
+    // consume_prints: what has traded since the last book update, per passive side.
+    struct Consumed {
+        std::unordered_map<Price, Qty> at;   // lots gone at each price
+        bool  swept = false;                 // prints reached `through`:
+        Price through = 0;                   //   every strictly better level is gone
+    };
+    Consumed consumed_[2];                   // [0] bids, [1] asks
+    Qty  gone_at(Side passive, Price px, Qty displayed) const;
+    void consume(Side passive, Price px, Qty qty, bool sweeps_better);
+    void reset_consumed();
 
     void fill_passive(Resting& r, Qty qty, Price px, Timestamp ts, Portfolio& pf,
                       std::vector<ExecutionReport>& out, FillCause cause, double queue_ahead);

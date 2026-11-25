@@ -29,6 +29,34 @@ void ExchangeSim::on_market(const MarketEvent& ev, const OrderBook& book, Portfo
                             std::vector<ExecutionReport>& out) {
     if (ev.type == EventType::Trade) on_trade(ev.trade, ev.ts, pf, out);
     else if (!book.empty() && !book.crossed()) on_depth(ev, book, pf, out);
+    else reset_consumed();
+}
+
+// A book update is the venue's state at its own timestamp: it already reflects
+// every print before it.
+void ExchangeSim::reset_consumed() {
+    if (!cfg_.consume_prints) return;
+    for (Consumed& c : consumed_) {
+        c.at.clear();
+        c.swept = false;
+    }
+}
+
+// Lots of the displayed size at (passive, px) that have already traded.
+Qty ExchangeSim::gone_at(Side passive, Price px, Qty displayed) const {
+    const Consumed& c = consumed_[passive == Side::Bid ? 0 : 1];
+    if (c.swept && (passive == Side::Bid ? px > c.through : px < c.through)) return displayed;
+    auto it = c.at.find(px);
+    return it == c.at.end() ? 0 : std::min(displayed, it->second);
+}
+
+void ExchangeSim::consume(Side passive, Price px, Qty qty, bool sweeps_better) {
+    Consumed& c = consumed_[passive == Side::Bid ? 0 : 1];
+    c.at[px] += qty;
+    if (!sweeps_better) return;
+    const bool deeper = passive == Side::Bid ? px < c.through : px > c.through;
+    if (!c.swept || deeper) c.through = px;
+    c.swept = true;
 }
 
 double ExchangeSim::queue_ahead(OrderId id) const {
@@ -63,6 +91,7 @@ Qty ExchangeSim::take_liquidity(const OrderRequest& req, Qty qty, Price limit, b
                                 Timestamp ts, const OrderBook& book, Portfolio& pf,
                                 Qty already_filled, std::vector<ExecutionReport>& out) {
     Qty filled = 0;
+    const Side passive = req.side == Side::Bid ? Side::Ask : Side::Bid;
     // Buying walks the asks, selling walks the bids, best price first.
     book.for_each_level(req.side == Side::Bid ? Side::Ask : Side::Bid, [&](Price px, Qty lvl_qty) {
         if (filled >= qty) return false;
@@ -70,8 +99,10 @@ Qty ExchangeSim::take_liquidity(const OrderRequest& req, Qty qty, Price limit, b
             if (req.side == Side::Bid && px > limit) return false;
             if (req.side == Side::Ask && px < limit) return false;
         }
-        Qty f = std::min(qty - filled, lvl_qty);
+        const Qty avail = cfg_.consume_prints ? lvl_qty - gone_at(passive, px, lvl_qty) : lvl_qty;
+        Qty f = std::min(qty - filled, avail);
         if (f <= 0) return true;
+        if (cfg_.consume_prints) consume(passive, px, f, false);
         filled += f;
         double fee = cfg_.fees.taker_fee(inst_.notional(px, f), inst_.qty(f));
         pf.on_fill(req.side, px, f, fee);
@@ -145,8 +176,11 @@ void ExchangeSim::on_new_order(const OrderRequest& req, Timestamp ts, const Orde
     rs.req          = req;
     rs.filled       = taken;
     rs.level_qty    = static_cast<double>(book.visible_qty_at_price(req.side, req.price));
-    rs.queue_ahead  = rs.level_qty;
-    rs.traded_since = 0.0;
+    // Size that already traded is not ahead of us; the next book update will
+    // show it gone, and it must not be mistaken for cancellations then.
+    rs.traded_since = cfg_.consume_prints
+        ? static_cast<double>(gone_at(req.side, req.price, static_cast<Qty>(rs.level_qty))) : 0.0;
+    rs.queue_ahead  = rs.level_qty - rs.traded_since;
     resting_[req.order_id] = rs;
 
     ExecutionReport r = base_report(req, ts);
@@ -196,9 +230,10 @@ void ExchangeSim::fill_passive(Resting& rs, Qty qty, Price px, Timestamp ts, Por
 
 void ExchangeSim::on_trade(const TradePrint& tr, Timestamp ts, Portfolio& pf,
                            std::vector<ExecutionReport>& out) {
-    if (resting_.empty() || tr.qty <= 0) return;
     // A buy aggressor lifts asks; a sell aggressor hits bids.
     const Side passive = (tr.aggressor == Side::Bid) ? Side::Ask : Side::Bid;
+    if (cfg_.consume_prints && tr.qty > 0) consume(passive, tr.price, tr.qty, true);
+    if (resting_.empty() || tr.qty <= 0) return;
 
     scratch_ids_.clear();
     for (auto& [id, rs] : resting_)
@@ -250,6 +285,7 @@ void ExchangeSim::on_trade(const TradePrint& tr, Timestamp ts, Portfolio& pf,
 
 void ExchangeSim::on_depth(const MarketEvent& ev, const OrderBook& book, Portfolio& pf,
                            std::vector<ExecutionReport>& out) {
+    reset_consumed();
     if (resting_.empty()) return;
 
     const bool snapshot = (ev.type == EventType::Snapshot);

@@ -248,3 +248,69 @@ TEST_CASE("Negative maker fee is a rebate", "[exchange]") {
     REQUIRE(out.back().fee == Approx(-100.5 * 1.0 * 0.0001));
     REQUIRE(pf.net_pnl(1005) > pf.total_pnl(1005));
 }
+
+TEST_CASE("consume_prints: a market order cannot take liquidity that already traded", "[exchange]") {
+    for (bool on : {false, true}) {
+        ExchangeConfig c;
+        c.consume_prints = on;
+        ExchangeSim ex(inst(), c);
+        Portfolio pf(inst());
+        std::vector<ExecutionReport> out;
+        OrderBook book = make_book();
+        ex.on_trade(trade(Side::Bid, 1001, 30), 1, pf, out);   // 30 of the 40 at 1001 are gone
+        OrderRequest m;
+        m.order_id = 1; m.side = Side::Bid; m.type = OrderType::Market; m.qty = 20;
+        ex.on_new_order(m, 2, book, pf, out);
+        REQUIRE(filled(out) == 20);
+        REQUIRE(out.front().fill_price == 1001);
+        REQUIRE(out.front().fill_qty == (on ? 10 : 20));
+        if (!on) continue;
+        // Our own take counts too: the next order starts at 1002.
+        out.clear();
+        m.order_id = 2; m.qty = 5;
+        ex.on_new_order(m, 3, book, pf, out);
+        REQUIRE(out.front().fill_price == 1002);
+        // A book update is fresh information.
+        auto d = delta({}, {{1001, 40}});
+        apply(book, d);
+        ex.on_market(d, book, pf, out);
+        out.clear();
+        m.order_id = 3;
+        ex.on_new_order(m, 11, book, pf, out);
+        REQUIRE(out.front().fill_price == 1001);
+    }
+}
+
+TEST_CASE("consume_prints: a sweep removes every better level", "[exchange]") {
+    ExchangeConfig c;
+    c.consume_prints = true;
+    ExchangeSim ex(inst(), c);
+    Portfolio pf(inst());
+    std::vector<ExecutionReport> out;
+    OrderBook book = make_book();
+    ex.on_trade(trade(Side::Bid, 1002, 10), 1, pf, out);   // printed through 1001
+    OrderRequest m;
+    m.order_id = 1; m.side = Side::Bid; m.type = OrderType::Market; m.qty = 50;
+    ex.on_new_order(m, 2, book, pf, out);
+    REQUIRE(out.size() == 1);
+    REQUIRE(out[0].fill_price == 1002);
+    REQUIRE(out[0].fill_qty == 50);   // 60 displayed, 10 gone
+}
+
+TEST_CASE("consume_prints: a passive order does not queue behind size that already traded", "[exchange]") {
+    ExchangeConfig c;
+    c.consume_prints = true;
+    c.queue.kind = QueueModel::Kind::RiskAverse;
+    ExchangeSim ex(inst(), c);
+    Portfolio pf(inst());
+    std::vector<ExecutionReport> out;
+    OrderBook book = make_book();
+    ex.on_trade(trade(Side::Ask, 1000, 30), 1, pf, out);
+    ex.on_new_order(limit(1, Side::Bid, 1000, 10), 2, book, pf, out);
+    REQUIRE(ex.queue_ahead(1) == 20.0);
+    // The update shows those 30 gone; that is the trade, not cancellations.
+    auto d = delta({{1000, 20}}, {});
+    apply(book, d);
+    ex.on_market(d, book, pf, out);
+    REQUIRE(ex.queue_ahead(1) == 20.0);
+}

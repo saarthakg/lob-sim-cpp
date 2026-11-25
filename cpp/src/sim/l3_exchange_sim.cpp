@@ -3,7 +3,13 @@
 #include <algorithm>
 
 L3ExchangeSim::L3ExchangeSim(Instrument inst, ExchangeConfig cfg)
-    : inst_(inst), cfg_(cfg), taker_(inst, cfg), book_(18, 1 << 16) {}
+    : inst_(inst), cfg_(cfg), taker_(inst, cfg), book_(18, 1 << 16) {
+    // Order-level books are never conflated, and taker_ sees no book updates
+    // that would reset what it has consumed.
+    ExchangeConfig tc = cfg;
+    tc.consume_prints = false;
+    taker_ = ExchangeSim(inst, tc);
+}
 
 double L3ExchangeSim::queue_ahead(OrderId id) const {
     if (!ours_.count(id)) return -1.0;

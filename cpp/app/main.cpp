@@ -87,6 +87,8 @@ Exchange model
   --queue-power N                   exponent for --queue power (default 2)
   --exchange-model auto|l2|l3       auto: exact-queue L3 exchange on order-level
                                     data (.l3bin), queue-model L2 exchange otherwise
+  --consume-prints                  L2 only: subtract prints (and our own takes) since
+                                    the last book update from the displayed size
   --impact none|displace            L3 only. displace: shares we take no longer also
                                     fill the real maker; its size stays in the queue
   --impact-ttl-ms N                 lifetime of displaced size whose owner is gone
@@ -149,7 +151,7 @@ struct Args {
 // must not silently run an experiment with the default value.
 static const std::set<std::string> kFlags = {
     "--no-cross-fill", "--no-fee-in-quotes", "--calib-log", "--passive", "--quiet", "--no-book-metrics",
-    "--quote-on-book", "--summary-only", "--measure-latency", "--help", "-h"};
+    "--quote-on-book", "--summary-only", "--consume-prints", "--measure-latency", "--help", "-h"};
 static const std::set<std::string> kOptions = {
     // modes
     "--replay", "--stats", "--live", "--live-capture", "--load-snapshot", "--convert-bitstamp-l3", "--replay-itch",
@@ -443,6 +445,7 @@ static int run_replay(EventSource& src, const Args& a) {
     cfg.exchange.queue.kind = choose<QueueModel::Kind>(a, "--queue", "power",
         {{"riskaverse", QueueModel::Kind::RiskAverse}, {"log", QueueModel::Kind::ProbLog}, {"power", QueueModel::Kind::ProbPower}});
     cfg.exchange.queue.power  = a.num("--queue-power", 2.0);
+    cfg.exchange.consume_prints = a.has("--consume-prints");
     cfg.exchange.displace_volume = choose<bool>(a, "--impact", "none", {{"none", false}, {"displace", true}});
     cfg.exchange.displaced_ttl_us = static_cast<int64_t>(a.num("--impact-ttl-ms", 0) * 1000);
     cfg.exchange.fill_on_cross = !a.has("--no-cross-fill");

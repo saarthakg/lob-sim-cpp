@@ -45,14 +45,17 @@ def days_on_disk(sym: str) -> list:
     return out
 
 
+CONSUME = False   # --consume-prints: see ExchangeConfig::consume_prints
+
+
 def run(job) -> pd.DataFrame:
     sym, day, algo = job
     name, extra = ALGOS[algo]
-    out = OUT / "runs" / f"{sym}_{day}_{name}{''.join(extra).replace('--', '_')}"
+    out = OUT / "runs" / f"{sym}_{day}_{name}{''.join(extra).replace('--', '_')}{'_consume' if CONSUME else ''}"
     csv = out / "executions.csv"
     if not csv.exists():
         cmd = [str(BIN), "--replay", str(DATA / f"{day}_{sym}_ob200.data.zip"),
-               "--trades", str(DATA / f"{sym}{day}.csv.gz"), "--strategy", "exec", "--algo", name, *extra,
+               "--trades", str(DATA / f"{sym}{day}.csv.gz"), "--strategy", "exec", "--algo", name, *extra, *(["--consume-prints"] if CONSUME else []),
                "--order-size", str(SIZES[sym]), "--slices", str(SLICES), "--horizon-s", str(HORIZON_S),
                "--latency-us", str(LATENCY_US), "--quiet", "--no-book-metrics", "--sample-ms", "60000",
                "--output", str(out)]
@@ -66,10 +69,15 @@ def run(job) -> pd.DataFrame:
 
 
 def main() -> int:
+    global BIN, CONSUME
     ap = argparse.ArgumentParser()
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 4) - 4))
     ap.add_argument("--only", nargs="+", default=list(SIZES))
+    ap.add_argument("--bin", default=str(BIN))
+    ap.add_argument("--consume-prints", action="store_true",
+                    help="subtract prints since the last book update from displayed size (robustness check)")
     a = ap.parse_args()
+    BIN, CONSUME = Path(a.bin), a.consume_prints
     jobs = [(s, d, g) for s in a.only for d in days_on_disk(s) for g in ALGOS]
     print(f"{len(jobs)} runs", flush=True)
     with ThreadPoolExecutor(a.jobs) as ex:
@@ -79,7 +87,9 @@ def main() -> int:
           f"Bybit USDT perpetuals, {HORIZON_S // 60}-minute parents cut into {SLICES} slices, {LATENCY_US / 1000:g} ms "
           "each-way latency, power-2 queue model, VIP0 fees (maker 2.0 bp, taker 5.5 bp). Cost is bp against the "
           "arrival mid, fees included. Nothing was fitted. `saving` is Cross minus the algorithm on the *same parents*; "
-          "its t-statistic uses one observation per day.\n",
+          "its t-statistic uses one observation per day." +
+          (" **Robustness run:** displayed size is reduced by prints since the last book update "
+           "(`--consume-prints`)." if CONSUME else "") + "\n",
           "| symbol | days | parents | algo | filled passively | price shortfall bp | fees bp | total bp | saving vs Cross bp | t (days) | days better |",
           "|---|---|---|---|---|---|---|---|---|---|---|"]
     rows = []
@@ -98,8 +108,9 @@ def main() -> int:
             md.append(f"| {sym} | {r['days']} | {r['parents']:,} | {algo} | {r['maker_share']:.0%} | "
                       f"{r['shortfall_bps']:+.2f} | {r['fee_bps']:.2f} | {r['total_bps']:+.2f} | {tail} |")
     OUT.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(rows).to_csv(OUT / "summary.csv", index=False)
-    (OUT / "EXECUTION.md").write_text("\n".join(md) + "\n")
+    suffix = "_consumed" if CONSUME else ""
+    pd.DataFrame(rows).to_csv(OUT / f"summary{suffix}.csv", index=False)
+    (OUT / f"EXECUTION{suffix.upper()}.md").write_text("\n".join(md) + "\n")
     print("\n".join(md))
     return 0
 
