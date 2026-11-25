@@ -133,6 +133,7 @@ def one_file(f: Path, n: int) -> list:
 
 
 def main() -> int:
+    global BIN
     ap = argparse.ArgumentParser()
     ap.add_argument("--files", nargs="+", required=True)
     ap.add_argument("--n", type=int, default=2000, help="clones per file")
@@ -140,7 +141,6 @@ def main() -> int:
     ap.add_argument("--jobs", type=int, default=3)
     ap.add_argument("--out", default=str(ROOT / "results" / "itch"))
     a = ap.parse_args()
-    global BIN
     BIN = Path(a.bin)
     rows = []
     with ThreadPoolExecutor(a.jobs) as ex:
