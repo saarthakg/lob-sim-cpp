@@ -698,20 +698,40 @@ latency, Nasdaq's published per-share fees, and end-of-day flattening.
   confirmed loss when the sizes vary this much: one day (2026-06-12) made
   +$13.9k and one (2026-05-18) lost $90.2k.
 
-**The dollar figures are not credible, and the README does not quote a profit
-or loss from them.** A [post-hoc check](results/nasdaq/PARTICIPATION.md) found
-the touch-joining control trades 21% of Nasdaq's printed volume on the
-confirmation days (47% in QQQ), which no real participant could do without
-moving the market. H5 is also volume-weighted, and 57% of its weight is QQQ and
-NVDA. By symbol the same number ranges from -0.51 (MU) to +0.10, with a median
-of -0.05 and 10 of 14 within ±0.10. Zero latency is a limit, not a setting
-anyone can buy.
+**How much depends on the simulator's assumptions?** Two things the feed cannot
+tell us are whether our fills should have taken volume from real makers, and
+whether an order arriving at a price that crosses our quote would have traded
+or was post-only. Both were bracketed *after* the verdicts were committed, on
+the same days, so this is exploratory
+([ROBUSTNESS.md](results/nasdaq/ROBUSTNESS.md)). Verdicts stand on the first row.
+
+| Impact | Cross-fills | Share of market volume, 50 µs | H1 t | H2 t | H3 c/share (t) | H4 c/share (t) | H5 c/share |
+|---|---|---|---|---|---|---|---|
+| none | on (study default) | 21% | -2.20 | -2.03 | -0.24 (-4.84) | +0.53 (+2.69) | +0.004 |
+| none | off | 11% | -1.99 | -1.76 | -0.34 (-5.97) | +0.79 (+4.85) | -0.002 |
+| displace | on | 20% | -1.92 | -2.17 | -0.31 (-6.39) | +0.55 (+2.65) | +0.017 |
+| displace | off | 6% | -2.08 | -2.11 | -0.32 (-3.63) | +0.93 (+4.50) | -0.006 |
+
+- **H3 and H5 hold under all four.** H1 and H2 miss under all four. H4 misses its
+  threshold only when cross-fills are on.
+- **The latency cost is not an artefact of the cross-fill rule.** That rule
+  supplies 48% of fills at 50 µs (2% at zero latency), which looked like the
+  explanation. Without it there are about half as many fills, and each one
+  loses *more*.
+- **Do not read the dollar totals.** The study-default control trades 21% of
+  Nasdaq's printed volume on the confirmation days, 47% in QQQ
+  ([PARTICIPATION.md](results/nasdaq/PARTICIPATION.md)), far more than a real
+  participant could without moving prices. No profit or loss is quoted from it.
+- **H5 is volume-weighted:** 57% of its weight is QQQ and NVDA. By symbol it
+  ranges from -0.51 (MU) to +0.10, median -0.05, with 10 of 14 within ±0.10. Zero latency is
+  a limit, not a setting anyone can buy.
 
 ```bash
 python python/data/fetch_itch.py                                 # streams 18 days (~150 GB of traffic, ~5 GB kept)
 python python/experiments/nasdaq_study.py --stage dev
 python python/experiments/nasdaq_study.py --stage confirm
-python python/experiments/nasdaq_participation.py && python python/experiments/nasdaq_plots.py
+python python/experiments/nasdaq_participation.py && python python/experiments/nasdaq_robustness.py
+python python/experiments/nasdaq_plots.py
 ```
 
 ### 5. What it would take
@@ -755,10 +775,12 @@ The original simulator's headline numbers were artifacts. In order of impact:
   pooled out-of-sample days and 30 confirmation days, all from August to
   October 2026. It is enough to reject the strategies here, but it is not a
   claim about every market regime.
-- **No market impact.** Our orders never move the replayed book. That is
-  reasonable at a few hundred dollars per order on Bybit. It is *not* reasonable
-  for the Nasdaq touch-joining control, which reaches 21% of volume
-  ([PARTICIPATION.md](results/nasdaq/PARTICIPATION.md)).
+- **Limited market impact.** By default our orders never change the replayed
+  market. `--impact displace` (L3) makes each printed share trade once and
+  leaves displaced makers in the queue, but nobody reacts to our orders and
+  prices do not move because of them. The default is reasonable at a few hundred
+  dollars per order on Bybit and is strained by the Nasdaq touch-joining control,
+  which reaches 21% of volume.
 - **On Bybit, the 100 ms book is a hard floor** on how fast a simulated strategy
   can see cancellations. (The Nasdaq study has no such floor.) Results are pessimistic for a truly low-latency participant,
   and the no-cross-fill bracket bounds that.
@@ -785,7 +807,8 @@ python/data            download_bybit.py, capture_bitstamp_l3.py, fetch_itch.py 
 python/analysis        signal_research.py, l3_ground_truth.py, queue_model_validation.py,
                        itch_clone_validation.py, run_report.py
 python/experiments     run_backtests.py, study.py, summarize_study.py, extra_oos.py, confirm.py, l2_vs_l3.py,
-                       execution_study.py, nasdaq_study.py, nasdaq_confirm.py, nasdaq_plots.py
+                       execution_study.py, nasdaq_study.py, nasdaq_confirm.py,
+                       nasdaq_participation.py, nasdaq_robustness.py, nasdaq_plots.py
 results/               study tables, fitted signals, taker/execution, Nasdaq study, queue validation, L2-vs-L3,
                        live latency sessions, ITCH replay, pre-registration + confirmation
 cpp/fuzz               libFuzzer targets for the ITCH and Bybit parsers

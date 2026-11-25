@@ -131,7 +131,16 @@ closed with market orders, whose spread and fees count in net PnL.
 - Our orders sit in the real FIFO. A print naming maker M fills us first if we
   have priority over M. A hidden print (no displayed maker) at our price fills
   us only from the front of the queue; one through our price fills us.
-- Still no impact: the real maker also trades, and nobody reacts to our order.
+- **Impact.** By default a print that fills us also fills the real maker it names,
+  so one share trades twice. `--impact displace` keeps the shares we took in that
+  maker's queue slot, ahead of later arrivals, until later flow trades them, the
+  maker cancels, or `--impact-ttl-ms` passes. Nobody reacts to our orders.
+- **Cross-fills.** A real order arriving at a price that crosses ours fills us,
+  since on the venue it would have met us first. It may have been post-only,
+  which the feed cannot show; `--no-cross-fill` is the other end of the bracket.
+- **Conflated L2 books.** `--consume-prints` subtracts prints (and our own takes)
+  since the last book update from the displayed size. Off by default so published
+  results reproduce; it moves the execution study by 0.06 bp or less.
 
 ## PnL accounting
 
