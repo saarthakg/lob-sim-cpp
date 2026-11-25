@@ -390,10 +390,10 @@ RunSummary Backtester::run() {
 
     if (!cfg_.output_dir.empty()) {
         std::filesystem::create_directories(cfg_.output_dir);
-        w_->equity = std::make_unique<CsvWriter>(cfg_.output_dir + "/equity.csv",
+        if (!cfg_.summary_only) w_->equity = std::make_unique<CsvWriter>(cfg_.output_dir + "/equity.csv",
             std::vector<std::string>{"ts", "mid", "position", "realized_pnl", "unrealized_pnl",
                                      "gross_pnl", "fees", "net_pnl", "n_fills", "open_orders"});
-        if (cfg_.write_book_metrics) {
+        if (cfg_.write_book_metrics && !cfg_.summary_only) {
             w_->book = std::make_unique<CsvWriter>(cfg_.output_dir + "/book_metrics.csv",
                 std::vector<std::string>{"ts", "best_bid", "best_bid_qty", "best_ask", "best_ask_qty",
                                          "spread_ticks", "mid", "weighted_mid", "imbalance_1",
@@ -460,6 +460,11 @@ void Backtester::finalize() {
             double m = std::isnan(f.mid_after[h]) ? mid : f.mid_after[h];
             sum_.markout[h] += s * (m - static_cast<double>(f.price)) * tick * u;
         }
+        const size_t ci = static_cast<size_t>(f.cause);
+        const double m5 = std::isnan(f.mid_after[2]) ? mid : f.mid_after[2];
+        sum_.cause_volume[ci] += u;
+        sum_.cause_edge[ci]   += s * (f.mid_at_fill - static_cast<double>(f.price)) * tick * u;
+        sum_.cause_mk5[ci]    += s * (m5 - static_cast<double>(f.price)) * tick * u;
         sum_.avg_queue_ahead_at_fill += f.queue_ahead_at_entry;
     }
     if (!fills_.empty()) sum_.avg_queue_ahead_at_fill /= static_cast<double>(fills_.size());
@@ -487,7 +492,7 @@ void Backtester::finalize() {
     }
 
     if (cfg_.output_dir.empty()) return;
-    {
+    if (!cfg_.summary_only) {
         CsvWriter fw(cfg_.output_dir + "/fills.csv",
             {"ts", "order_id", "side", "liquidity", "cause", "price", "qty", "fee", "mid_at_fill",
              "queue_ahead_at_entry", "queue_ahead_at_fill", "position_after", "mid_100ms", "mid_1s", "mid_5s", "mid_30s",
@@ -540,6 +545,10 @@ void Backtester::write_summary_json(const RunSummary& s, const std::string& path
     j["edge"] = s.edge;
     const char* names[N_MARKOUTS] = {"100ms", "1s", "5s", "30s", "60s", "300s"};
     for (int h = 0; h < N_MARKOUTS; ++h) j["markout"][names[h]] = s.markout[h];
+    for (size_t c = 0; c < s.cause_volume.size(); ++c)
+        if (s.cause_volume[c] > 0)
+            j["by_cause"][cause_name(static_cast<FillCause>(c))] =
+                {{"volume", s.cause_volume[c]}, {"edge", s.cause_edge[c]}, {"markout_5s", s.cause_mk5[c]}};
     j["max_drawdown"] = s.max_drawdown;
     j["max_abs_position"] = s.max_abs_position;
     j["mean_abs_position"] = s.mean_abs_position;

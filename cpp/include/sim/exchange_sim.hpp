@@ -38,7 +38,8 @@ struct ExchangeConfig {
     QueueModel  queue;
     // If true (default), an order whose price the opposite side's best quote
     // has moved *through* is filled even without a matching trade print —
-    // the only fill evidence available when no trade feed is loaded.
+    // the only fill evidence available when no trade feed is loaded. On the L3
+    // exchange: a real order arriving at a price that crosses ours fills us.
     bool fill_on_cross = true;
     // L3 exchange only. Off: a print that fills us also fills the real maker it
     // names (no impact: the same share trades twice). On: the shares we take

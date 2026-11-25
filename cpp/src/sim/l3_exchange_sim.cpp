@@ -96,7 +96,7 @@ void L3ExchangeSim::on_market(const MarketEvent& ev, const OrderBook& l2, Portfo
         case L3Type::Add: {
             const Side side = l3_side(r.side);
             book_.add(r.id, side, r.price, r.qty);
-            if (!ours_.empty() || !phantoms_.empty()) on_resting_cross(r, side, r.price, ev.ts, l2, pf, out);
+            if (cfg_.fill_on_cross && (!ours_.empty() || !phantoms_.empty())) on_resting_cross(r, side, r.price, ev.ts, l2, pf, out);
             break;
         }
         case L3Type::Delete:

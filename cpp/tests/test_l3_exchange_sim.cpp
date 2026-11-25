@@ -266,3 +266,16 @@ TEST_CASE("Displacement: we never take more from prints than the market printed"
     REQUIRE(g.ex.our_print_volume() > 0);
     REQUIRE(g.filled() <= printed);
 }
+
+TEST_CASE("L3 exchange: fill_on_cross = false fills on prints only", "[l3ex]") {
+    ExchangeConfig c;
+    c.fill_on_cross = false;
+    Rig g(c);
+    g.push(L3Type::Add, 1, Side::Bid, 99, 10);
+    g.push(L3Type::Add, 9, Side::Ask, 105, 500);
+    g.order(1, Side::Bid, 100, 30);
+    g.push(L3Type::Add, 2, Side::Ask, 100, 50);
+    REQUIRE(g.filled() == 0);
+    g.push(L3Type::Trade, 1, Side::Ask, 99, 10);   // a real sale through our price
+    REQUIRE(g.filled() == 10);
+}

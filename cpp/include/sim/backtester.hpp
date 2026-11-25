@@ -56,6 +56,7 @@ struct BacktestConfig {
     std::string    output_dir;            // empty = no files written
     bool           write_book_metrics = true;
     bool           quiet = false;
+    bool           summary_only = false;  // write summary.json and nothing else (large sweeps)
     // Replay: stamp each event's local_ns at pop time, so engine compute
     // (pop -> order) is measured offline exactly as on a live feed.
     bool           measure_latency = false;
@@ -92,6 +93,8 @@ struct RunSummary {
     size_t maker_fills = 0, taker_fills = 0;
     double maker_volume = 0.0, taker_volume = 0.0;   // base units
     double notional = 0.0;                            // quote ccy
+    // Filled volume and spread-at-fill by cause (index: FillCause).
+    std::array<double, 5> cause_volume{}, cause_edge{}, cause_mk5{};
 
     double gross_pnl = 0.0, fees = 0.0, net_pnl = 0.0;
     double realized_pnl = 0.0;

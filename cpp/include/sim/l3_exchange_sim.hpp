@@ -26,6 +26,9 @@
 //   * Resting cross: a market order that rests at a price crossing ours,
 //     while the real book is *not* crossed, only rested because we weren't
 //     there — on the venue it would have traded with us. Fill up to its size.
+//     This is the pessimistic reading: a post-only order would instead have
+//     been repriced or rejected, and the feed cannot tell the two apart.
+//     fill_on_cross = false is the optimistic one (only prints fill us).
 //     (A real book that is crossed means an incoming taker, whose trades
 //     follow as prints and are handled by the first rule.)
 //

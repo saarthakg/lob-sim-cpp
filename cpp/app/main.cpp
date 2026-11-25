@@ -120,6 +120,7 @@ Output
   --output <dir>    write summary.json, fills.csv, equity.csv, book_metrics.csv
   --sample-ms N     equity/book sampling interval (default 1000)
   --no-book-metrics skip book_metrics.csv (batch sweeps: it is ~10 MB per day)
+  --summary-only    write summary.json only (large sweeps)
   --measure-latency replay: time engine compute (event pop -> order) per reaction
   --quiet
 )";
@@ -148,7 +149,7 @@ struct Args {
 // must not silently run an experiment with the default value.
 static const std::set<std::string> kFlags = {
     "--no-cross-fill", "--no-fee-in-quotes", "--calib-log", "--passive", "--quiet", "--no-book-metrics",
-    "--quote-on-book", "--measure-latency", "--help", "-h"};
+    "--quote-on-book", "--summary-only", "--measure-latency", "--help", "-h"};
 static const std::set<std::string> kOptions = {
     // modes
     "--replay", "--stats", "--live", "--live-capture", "--load-snapshot", "--convert-bitstamp-l3", "--replay-itch",
@@ -426,6 +427,7 @@ static int run_replay(EventSource& src, const Args& a) {
     cfg.quiet      = a.has("--quiet");
     cfg.sample_us  = static_cast<int64_t>(a.num("--sample-ms", 1000) * 1000);
     cfg.write_book_metrics = !a.has("--no-book-metrics");
+    cfg.summary_only       = a.has("--summary-only");
     cfg.measure_latency    = a.has("--measure-latency");
     cfg.exchange.fees.maker = a.num("--maker-fee-bps", 2.0) * 1e-4;
     cfg.exchange.fees.taker = a.num("--taker-fee-bps", 5.5) * 1e-4;
