@@ -73,8 +73,13 @@ def bounds(r: np.ndarray, n: int, seed: int) -> pd.DataFrame:
     for i in np.flatnonzero(typ == ADD):
         by_level.setdefault((r["side"][i], r["price"][i]), []).append(i)
     by_level = {k: np.array(v) for k, v in by_level.items()}
-    rows = []
+    rows, busy = [], {}
     for i in pick:
+        # One clone per level at a time: two would share a small print, and the
+        # second would look "late" for a reason that isn't queue priority.
+        key = (r["side"][i], r["price"][i])
+        if ts[i] < busy.get(key, 0):
+            continue
         probe_ts = ts[i] + 1
         j = np.searchsorted(ts, probe_ts)              # event the clone reacts to
         if j >= len(ts):
@@ -85,6 +90,7 @@ def bounds(r: np.ndarray, n: int, seed: int) -> pd.DataFrame:
         lvl = by_level[(r["side"][i], r["price"][i])]
         k = np.searchsorted(lvl, place, side="right")
         r2 = first_trade.get((r["id"][lvl[k]], r["price"][i]), np.nan) if k < len(lvl) else np.nan
+        busy[key] = done[r["id"][i]] + 60_000_000
         rows.append((len(rows), r["side"][i], r["price"][i], probe_ts, done[r["id"][i]], r2))
     return pd.DataFrame(rows, columns=["probe", "side", "price", "ts", "r1_done", "r2_first"])
 
