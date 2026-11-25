@@ -60,6 +60,11 @@ void ItchL3Extractor::add(Sym& s, uint64_t ts, uint64_t ref, Side side, uint32_t
         s.subdollar[ref] = side == Side::Bid ? 0 : 1;
         return;
     }
+    if (price % 100 != 0) {
+        ++s.st.subpenny_orders;
+        s.subdollar[ref] = side == Side::Bid ? 0 : 1;   // ignored from here on, like a sub-$1 order
+        return;
+    }
     const Price px = price / 100;
     if (!s.book->add(ref, side, px, shares)) return;
     ++s.st.adds;

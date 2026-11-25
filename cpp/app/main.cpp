@@ -703,7 +703,14 @@ static int run_extract_itch(const std::string& path, const Args& a) {
                     (unsigned long long)s.skipped_subdollar, (unsigned long long)s.unknown_ref,
                     (unsigned long long)s.halts_in_session, (unsigned long long)s.open_cross_shares);
     }
-    if (!ex.done()) return 2;
+    bool half_penny = false;
+    for (const auto& s : stats)
+        if (s.subpenny_orders > 0) {
+            std::printf("  ** %s: %llu displayed orders off the cent grid: half-penny tick, file unusable **\n",
+                        s.symbol.c_str(), (unsigned long long)s.subpenny_orders);
+            half_penny = true;
+        }
+    if (!ex.done() || half_penny) return 2;
     return missing == static_cast<int>(stats.size()) ? 1 : 0;
 }
 

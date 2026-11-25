@@ -54,6 +54,8 @@ TEST_CASE("ITCH extraction maps every order message to L3 records", "[itch][l3]"
     ex.on_replace(7, T0 + 5000, 2, 4, 50, 1500300);            // delete 2, add 4 (still an ask)
     ex.on_cancel(7, T0 + 6000, 1, 60);                         // cancels the rest of 1
     ex.on_delete(7, T0 + 6000, 999);                           // unknown
+    ex.on_add(7, T0 + 7000, 60, 'B', 10, 1500050);             // half-penny order: dropped and counted
+    ex.on_delete(7, T0 + 7000, 60);
     REQUIRE_FALSE(ex.done());
     ex.on_add(7, 57'600'000'000'000ULL, 50, 'B', 1, 1500000);  // 16:00:00: past the end
     REQUIRE(ex.done());
@@ -62,6 +64,7 @@ TEST_CASE("ITCH extraction maps every order message to L3 records", "[itch][l3]"
     REQUIRE(st[0].found);
     REQUIRE_FALSE(st[1].found);
     REQUIRE(st[0].skipped_subdollar == 1);
+    REQUIRE(st[0].subpenny_orders == 1);
     REQUIRE(st[0].unknown_ref == 1);
     REQUIRE(st[0].nonprintable == 1);
     REQUIRE(st[0].hidden_prints == 1);

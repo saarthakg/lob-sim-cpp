@@ -23,6 +23,9 @@
 //                             Prints at a sub-penny price are dropped: they
 //                             are midpoint-style executions strictly inside a
 //                             penny, so they say nothing about a displayed queue.
+// A displayed order priced >= $1 off the cent grid is dropped and counted: it
+// means the stock had a half-penny tick that day (Reg NMS Rule 612 as amended),
+// and a book on a cent grid would be wrong, so callers must reject the file.
 // Orders priced below $1 (sub-penny stub quotes) are skipped: they cannot be
 // represented on a cent grid and never trade in a stock worth backtesting.
 //
@@ -36,6 +39,7 @@ public:
         std::string symbol;
         uint64_t records = 0, adds = 0, prints = 0, hidden_prints = 0, subpenny_prints = 0;
         uint64_t skipped_subdollar = 0, unknown_ref = 0, nonprintable = 0;
+        uint64_t subpenny_orders = 0;    // displayed orders >= $1 off the cent grid (dropped; see below)
         uint64_t halts_in_session = 0;   // trading actions other than 'T' after 09:30
         uint64_t open_cross_shares = 0;  // shares in the first cross of the day
         bool     found = false;
