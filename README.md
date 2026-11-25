@@ -17,11 +17,11 @@ Nasdaq's full order feed.
 
 **What the platform found** ([Results](#results)):
 
-- **The strategies work as designed and the research features pay off.**
-  GLFT and a queue-priority ladder, with an out-of-sample-fitted book-imbalance
-  alpha and a trade-driven depletion guard, cut losses 85–99% versus naive
-  quoting. They also raise the spread captured at fill from negative to
-  +0.5–7 bp.
+- **Smarter quoting mostly means quoting less.** Versus naive touch-joining, GLFT
+  and the ladder cut losses 77-100%, but they also cut volume 86-99.7%, nearly
+  one for one. Per dollar traded, gross PnL improved in 11 of 21 comparisons.
+  The spread captured at the fill always rises, but within seconds the price
+  gives it back.
 - **The imbalance signal is real.** Correlation with 1–5 s returns is 0.13–0.34
   out of sample, and on BTC it is profitable before costs when trading on it as a
   taker.
@@ -499,11 +499,14 @@ What the table shows:
   loses money *before fees* out of sample. The fee tier only decides how much
   more it loses. The one positive net cell, XLM GLFT with a rebate at
   +$1.5/day, is positive on 2 of 4 days and is noise.
-- **The research ideas do help.** Imbalance alpha, fee-aware depth, the
-  queue-priority ladder and the trade-driven depletion guard shrink ATOM losses
-  from −$480/day (naive) to −$65/day (ladder) at VIP0, and from −$166 to −$22
-  at the rebate tier. They move *edge at fill* from negative to +0.5–7 bp. And
-  they were selected on training data, not by hand.
+- **The research ideas mostly reduce volume, not adverse selection.** ATOM
+  losses fall from -$480/day (naive) to -$65/day (ladder) at VIP0, but volume
+  falls 86% too, and gross PnL per dollar is unchanged (-1.83 vs -1.79 bp). Over
+  all 21 symbol x strategy x fee cells, edge at the fill rises in every one;
+  gross bp improves in 11, clearly so only for BTCUSDT and XLMUSDT, and gets worse for
+  the ADA ladder (-1.77 to -3.01) and most ATOM GLFT cells. An earlier version
+  of this README presented the smaller dollar losses as the research features
+  paying off.
 - **None of it beats adverse selection.** Within 5 seconds the mid moves
   through the fill by more than the spread captured. A resting order mostly
   fills when the market is about to move through it, and that is the
