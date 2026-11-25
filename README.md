@@ -2,819 +2,171 @@
 
 [![CI](https://github.com/saarthakg/lob-sim-cpp/actions/workflows/ci.yml/badge.svg)](https://github.com/saarthakg/lob-sim-cpp/actions/workflows/ci.yml)
 
-A **C++ limit-order-book engine and market-making research platform**:
-event-driven replay of full exchange order books, a matching simulator with an
-explicit queue-position model and three latency channels, literature-based
-market-making strategies, and a research workflow built so it can't fool
-itself. It runs entirely on **free public data**: Bybit perpetuals, Bitstamp, and
-Nasdaq's full order feed.
+A **C++ limit-order-book engine and backtester with exact queue priority**, a
+Python API on top, and a research workflow built so it can't fool itself. It
+runs entirely on free public data: Nasdaq's full order feed, Bybit perpetuals
+and Bitstamp.
 
-| | |
-|---|---|
-| **Speed** | Order-level (L3) book at **50M msgs/s, 18 ns p50 / 46 ns p99 per operation**, 5× a `std::map`/`std::list` book. A **full Nasdaq ITCH 5.0 day** (268.7M messages, 8,892 symbols) rebuilds every order book in 22 s of compute. **Live tick-to-trade of 8.2 µs p50 / 22 µs p99** on Bybit's real-time feed (WebSocket thread → lock-free ring → engine). |
-| **Fidelity** | On order-level data, simulated orders sit in the **real FIFO queue**: against 288,295 real Nasdaq orders, **0 impossible fills and no unexplained misses**, and 0.996 accuracy against independent Bitstamp ground truth. On L2-only data a queue model is used instead, and its errors are measured on the same orders (4.5% of fills jump a queue that stayed put). Feed, order-entry and response latency are modelled separately, so stale quotes really do get picked off. |
-| **Rigour** | Walk-forward parameter selection; 16 out-of-sample days; sensitivity sweeps over latency, queue model and fill rule; and two **pre-registered** confirmation tests (30 untouched Bybit days, 8 Nasdaq days from 2025-26). CI on GCC, Clang and AppleClang, with ASan/UBSan, TSan and fuzzing jobs. |
+```python
+import lobsim
 
-**What the platform found** ([Results](#results)):
-
-- **Smarter quoting mostly means quoting less.** Versus naive touch-joining, GLFT
-  and the ladder cut losses 77-100%, but they also cut volume 86-99.7%, nearly
-  one for one. Per dollar traded, gross PnL improved in 11 of 21 comparisons.
-  The spread captured at the fill always rises, but within seconds the price
-  gives it back.
-- **The imbalance signal is real.** Correlation with 1–5 s returns is 0.13–0.34
-  out of sample, and on BTC it is profitable before costs when trading on it as a
-  taker.
-- **Passive execution beats crossing the spread** by 2.4-3.7 bp per parent
-  order, on all 50 days and all four symbols (12,000 paired parents each). Under
-  the harshest fill assumptions it still saves 1.6-2.3 bp, on every day.
-- **Retail-latency market making is still not profitable.** Adverse selection
-  outweighs the spread captured at every fee tier tested, including a maker
-  rebate. The platform quantifies the gap: how much edge, how fast a reaction
-  and what fee tier it would take.
-- **On Nasdaq, the top maker rebate roughly equals adverse selection.** With
-  exact queue priority and zero latency, joining the touch nets about 0 c/share
-  after the 0.30 c rebate in both 2019-21 and pre-registered 2025-26 data, and
-  loses more with every step of latency. Of five pre-registered predictions two
-  were confirmed, and the misses are reported as misses.
-- **A promising pattern failed its pre-registered test.** This is exactly
-  the kind of false positive the workflow is built to catch.
-
-> The pre-overhaul version of this README reported market-making profits. Those
-> came from a fill model that could not fill a resting order honestly, a
-> replay that began from an empty book, and Binance "bookDepth" files that are
-> not order-book data at all. See [What changed](#what-changed-and-why) for
-> the full list.
-
----
-
-## Contents
-
-- [Quickstart](#quickstart)
-- [Order-level (L3) engine](#order-level-l3-engine)
-- [Nasdaq ITCH 5.0 replay](#nasdaq-itch-50-replay)
-- [Live paper-trading runtime](#live-paper-trading-runtime)
-- [How the simulator works](#how-the-simulator-works)
-- [Strategies](#strategies)
-- [Research workflow](#research-workflow)
-- [Results](#results)
-- [What changed and why](#what-changed-and-why)
-- [Limitations](#limitations)
-- [Sources](#sources)
-
----
-
-## Quickstart
-
-```bash
-# build (macOS: if the system CLT is broken, use Homebrew LLVM — see docs/architecture.md)
-cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
-cmake --build build -j
-./build/lob_tests                                   # 115 test cases
-
-# data: one day of Bybit BTCUSDT book (~200 MB) + trades (~12 MB)
-python3 -m venv python/.venv && python/.venv/bin/python -m pip install -r python/requirements.txt
-python/.venv/bin/python python/data/download_bybit.py --symbol BTCUSDT --start 2026-10-03 --end 2026-10-03
-
-# profile the market: spread distribution and whether passive quoting can pay its fees
-./build/lob_sim --stats data/raw/bybit/2026-10-03_BTCUSDT_ob200.data.zip \
-                --trades data/raw/bybit/BTCUSDT2026-10-03.csv.gz
-
-# backtest the GLFT market maker with a 5 ms one-way latency
-./build/lob_sim --replay data/raw/bybit/2026-10-03_BTCUSDT_ob200.data.zip \
-                --trades data/raw/bybit/BTCUSDT2026-10-03.csv.gz \
-                --strategy glft --order-size 0.01 --max-position 0.1 \
-                --latency-us 5000 --output data/processed/glft_demo
-python/.venv/bin/python python/analysis/run_report.py --run data/processed/glft_demo --save
+r = lobsim.backtest("2019-12-30_INTC.l3bin.gz", "naive", quote_on_book=True, order_size=100,
+                    max_position=500, latency_us=50, maker_fee_per_unit=-0.003, taker_fee_per_unit=0.003,
+                    session_start="09:35:00", session_end="15:55:00")   # 801k events in about 0.3 s
+r.summary["net_pnl"], r.fills["queue_ahead_at_entry"], r.equity["net_pnl"]
 ```
 
-The order-level engine, ITCH replay and live runtime:
+## Three results
 
-```bash
-./build/lob_bench_l3                                # L3 book vs std::map/std::list book
+### 1. Simulated fills match the real queue
 
-# record Bitstamp's public order-level feed, convert, replay with exact queue priority
-python/.venv/bin/python python/data/capture_bitstamp_l3.py --pairs btcusd --minutes 30
-./build/lob_sim --convert-bitstamp-l3 data/raw/bitstamp/<capture>.l3.jsonl --output btc.l3bin
-./build/lob_sim --replay-l3 btc.l3bin                               # book-only throughput + consistency
-./build/lob_sim --replay btc.l3bin --strategy naive --quote-on-book # exact-queue backtest
+Most backtesters guess where an order sits in the queue. On order-level data
+this one puts it in the **real FIFO**. To check, a one-share simulated clone was
+placed right behind each of 288,295 real Nasdaq orders. Price-time priority then
+fixes when the clone may fill: never before the order ahead, never after the
+next one behind.
 
-# stream a Nasdaq day into per-symbol order files, then backtest one with exact queue priority
-python/.venv/bin/python python/data/fetch_itch.py --days 2019-12-30 --symbols INTC
-./build/lob_sim --replay data/processed/itch_l3/2019-12-30_INTC.l3bin.gz --strategy naive --quote-on-book \
-                --order-size 100 --max-position 500 --latency-us 50 \
-                --maker-fee-per-unit -0.0030 --taker-fee-per-unit 0.0030 \
-                --session-start 09:35:00 --session-end 15:55:00 --output data/processed/intc
-
-# a full Nasdaq day (free sample: emi.nasdaq.com/ITCH/Nasdaq ITCH/12302019.NASDAQ_ITCH50.gz)
-./build/lob_sim --replay-itch 12302019.NASDAQ_ITCH50.gz --snapshot-time 10:30:00 --symbols AAPL,MSFT
-
-# live paper trading on Bybit's real-time feed, with latency percentiles
-./build/lob_sim --live bybit --symbol BTCUSDT --minutes 10 --strategy naive \
-                --order-size 0.001 --max-position 0.01 --quote-on-book
-```
-
-Run `./build/lob_sim --help` for every option: fees (negative = rebate), queue
-model, exchange model, the fill-model bracket, per-channel latency and jitter,
-and strategy parameters.
-
----
-
-## Order-level (L3) engine
-
-`L3Book` is a full order-level book with strict price-time priority, built
-for replaying an exchange's raw order feed.
-
-```
- order id ──FlatHashMap──▶ pool index ──▶ Order {prev,next,level}  ◀── intrusive FIFO per price level
-                                                 │
- price ──PriceLadder (bitmap window + overflow)──▶ Level {head,tail,total,count}
-```
-
-| Design choice | Why |
-|---|---|
-| Orders in an index-based `ObjectPool`, linked into intrusive doubly linked FIFOs | O(1) add, cancel, modify and execute, with no search inside a level; 32-bit links keep orders dense; no malloc once warmed up |
-| `FlatHashMap` (open addressing, linear probing, backward-shift deletion) for order id → order | One or two cache lines per lookup; no tombstones, so probe lengths don't degrade under real feeds where most orders are cancelled |
-| `PriceLadder`: a dense price window with a two-level occupancy bitmap, plus a map for far prices | Finding the next best price after the touch empties is a couple of `ctz`/`clz` instructions, not a tree walk; the window recentres when the market drifts |
-
-**Correctness.** A 300k-operation randomized differential test checks every
-step against a `std::map`/`std::list` reference book, including identical
-maker fill sequences from `match()`. Tests: `cpp/tests/test_l3_book.cpp`.
-
-**Speed** (`lob_bench_l3`, 5M-message order-level stream: 50% add, 40%
-cancel, executes and sweeps; ~20k resting orders; Apple M-series):
-
-| Book | Throughput | p50 | p90 | p99 | p99.9 |
-|---|---|---|---|---|---|
-| **L3Book** | **50.1M msg/s** | **18 ns** | **23 ns** | **46 ns** | **143 ns** |
-| `std::map` + `std::list` + `std::unordered_map` | 10.4M msg/s | 91 ns | 109 ns | 189 ns | 323 ns |
-
-**Real exchange data.**
-- `python/data/capture_bitstamp_l3.py` records Bitstamp's public order-level
-  feed; `lob_sim --convert-bitstamp-l3` turns it into a fixed-record binary
-  format (`.l3bin`).
-- `lob_sim --replay-l3` replays it.
-- 150 minutes of BTC/USD (954k events) replays at **24M records/s**, with zero
-  unknown order references.
-
-**Exact-queue exchange.** On `.l3bin` data the backtester uses
-`L3ExchangeSim`. Our orders are inserted into the real FIFO, so every later
-market order queues behind us and every cancel ahead moves us up. A trade
-print fills us exactly when the matching engine would have reached our order
-before the real maker. Scored against the independent L3 ground truth
-(`python/analysis/queue_model_validation.py`):
-
-| BTC/USD, 60 s horizon (63% of fills queue-driven) | Fill rate (true 0.305) | Accuracy | Precision |
-|---|---|---|---|
-| **Exact-queue L3 exchange** | **0.300** | **0.996** | **1.000** |
-| Best L2 queue model (Power-2) | 0.296 | 0.965 | 0.957 |
-| Log queue model | 0.392 | 0.889 | 0.747 |
-
-**Checked against real Nasdaq orders.** A real order's fate is in the feed, so
-it can referee the simulator. For 288,295 real displayed orders (14 stocks, 9
-days in 2019 and 2025-26), a one-share simulated clone is placed right behind the real one.
-Price-time priority then brackets the clone's fill: never before the order
-ahead finished, never after the next order behind it traded. The bounds are
-computed in Python from the raw records, independently of the C++ book
-([results/itch/CLONE_VALIDATION.md](results/itch/CLONE_VALIDATION.md)).
-
-| Model (same market) | Impossible fills (jumped the queue) | Missed fills |
+| Model, on the same market | Impossible fills (jumped the queue) | Missed fills |
 |---|---|---|
-| **Exact-queue L3 exchange** | **0 of 288,295** | **2 of 79,713** (see below) |
-| L2 Power-2 (default) | 13,096 (4.5%) | 1,400 (1.8%) |
-| L2 RiskAverse | 735 (0.3%) | 11,410 (14.3%) |
-| L2 Log | 20,947 (7.3%) | 3,264 (4.1%) |
-
-Both "misses" are the test competing with itself: a one-share print went to
-another clone at a better price, as price priority requires.
-
-The clones follow orders that were *not* cancelled, so the L2 rows show how
-often a model jumps a queue that really stayed in place. They are not
-unconditional error rates.
-
-Every strategy runs unchanged on both data paths, and `--exchange-model l2`
-scores the queue model on the same L3 market for a direct comparison
-([results/l2_vs_l3/COMPARISON.md](results/l2_vs_l3/COMPARISON.md)). Running
-naive, ladder and GLFT strategies on 150 minutes of Bitstamp BTC, ETH and XRP
-under both exchanges:
-
-- **Fill counts.** The queue model's fills are −4% to +48% off the
-  exact-queue fills. XRP touch-joining strategies are over-filled by about
-  45%.
-- **Gross edge.** It is misstated by up to 0.8–1.5 bp in either direction,
-  the same order of magnitude as maker fees and as the edge being measured.
-- **What survives.** Every configuration is negative under both exchanges, so
-  the conclusions hold. But the size of a market maker's edge can only be
-  trusted with exact queue priority.
-
----
-
-## Nasdaq ITCH 5.0 replay
-
-`itch::parse_itch` is a zero-copy decoder for Nasdaq TotalView-ITCH 5.0,
-the binary order-level feed of every Nasdaq-traded stock.
-
-- **Decoding.** Length-framed, big-endian messages are decoded in place and
-  dispatched to a templated handler: no virtual calls and no copies.
-- **Books.** `ItchBookBuilder` keeps one `L3Book` per symbol.
-- **Prices** use an exact, order-preserving piecewise scale: 1/10,000 USD
-  below $1, cents at or above $1. Sub-penny quotes are legal only below $1
-  (Reg NMS Rule 612), and the rule depends on the *order's* price, not the
-  stock's, so a $0.0001 stub bid on a $12 stock is kept exactly.
-
-**Nasdaq's free 2019-12-30 sample day** (8.25 GB uncompressed,
-[results/itch/2019-12-30_replay.txt](results/itch/2019-12-30_replay.txt)):
-
-| | |
-|---|---|
-| Messages | 268.7M: 118.6M adds, 114.4M deletes, 21.6M replaces, 5.8M executions, 2.8M partial cancels |
-| Books | 8,892 symbols, every one empty at end of feed (as it should be after the close) |
-| Consistency | 0 unknown order refs, 0 duplicate adds, 0 over-executions, 0 sub-penny prices ≥ $1 |
-| Compute (decode + book updates) | 21.7 s, i.e. **12.4M msgs/s (81 ns/msg)** |
-| End to end incl. disk | 24.0 s (11.2M msgs/s) |
-
-The full-market rate is below the single-book benchmark (18 ns/op). The
-profile shows the time spread across the book operations rather than any one
-hotspot: each message lands on a random one of ~9k books, so the working set
-far exceeds the CPU caches and the cost is memory latency.
-
-The results file includes a 10:30 snapshot of the AAPL, MSFT, AMZN, TSLA and
-QQQ books, for example AAPL $286.37 × $286.40 and MSFT $157.11 × $157.12:
-plausible levels for those names in late December 2019, built purely from
-order messages.
-
----
-
-## Live paper-trading runtime
-
-`lob_sim --live bybit --symbol BTCUSDT --strategy <s> --quote-on-book` runs
-any strategy against Bybit's **real-time** public feed, with orders matched by
-the simulated exchange. It needs no account and no API keys, and it uses the
-same `Backtester`, strategies and exchange as a backtest; only the
-`EventSource` changes.
-
-```
- WebSocket thread                                    engine thread
- frame ─▶ stamp recv time ─▶ fixed-point parse ─▶ SpscRing ─▶ exchange sim ─▶ strategy ─▶ order
-                                                 lock-free       ↑ recv→engine    ↑ engine→trade
-                                                 SPSC ring       └──────── tick→trade ────────┘
-```
-
-| Piece | Design |
-|---|---|
-| Hand-off | Lock-free SPSC ring: cache-line-separated head and tail, each side caching the other's index, acquire/release only. ThreadSanitizer-clean under a 5M-message two-thread test. |
-| Parsing | The same allocation-light fixed-point parser as the historical archive (the archive stores the WebSocket messages verbatim). |
-| Flow control | Backpressure, never drops, since a lost delta corrupts the book. Reconnects resubscribe and arrive as a fresh snapshot. |
-| Measurement | Every frame is stamped on arrival. Receive→engine, engine→trade and tick→trade are recorded for every order or cancel sent *in reaction to* an event, with a 1 s start-up warm-up excluded. |
-
-**10 minutes live, BTCUSDT** (`orderbook.50` + `publicTrade`, laptop, no core
-pinning; 20k events, zero ring overruns):
-
-| Stage | p50 | p90 | p99 | p99.9 |
-|---|---|---|---|---|
-| Parse (WebSocket thread) | 1.6 µs | — | 6.4 µs | — |
-| Receive → engine (through the ring) | 2.6 µs | 6.1 µs | 37.5 µs | 818 µs |
-| Engine → order (exchange sim + strategy) | 3.2 µs | 6.5 µs | 12.9 µs | 14.1 µs |
-| **Tick → trade** (frame received → order sent) | **8.2 µs** | **14.8 µs** | **22.2 µs** | **25.4 µs** |
-
-**Profiling.** `--measure-latency` replays an archive while timing the same
-engine path, so it can be profiled reproducibly. The profile showed the
-`std::map` L2 book plus a per-event hash map dominating. Rebuilding the L2
-book on the bitmap price ladder cut engine compute on a full BTCUSDT day from
-**25.7 µs to 3.1 µs at p50** and from **103 µs to 8.9 µs at p99**, and live
-tick-to-trade from 16.4 µs to 8.2 µs, with backtest results bit-identical.
-
-The remaining p99.9 tail on receive→engine is OS scheduling on a laptop.
-Core pinning and a busy-polling socket would be the next steps on a
-dedicated host.
-
----
-
-## How the simulator works
-
-```
- Bybit ob200 (.zip) ─┐                      exchange time                         local (strategy) time
- Bybit trades (.gz) ─┼─▶ EventSource ─▶ book ─▶ ExchangeSim ─┬─ feed_us ────▶ local book ─▶ Strategy
- v2 live capture  ───┘   merge by       (true)   queue model  │                              │
-                         engine time             fills, fees  ◀── entry_us (orders, cancels) ─┘
-                                                 Portfolio   ── response_us (fills, acks) ──▶ local position
-```
-
-| Concern | What the simulator does |
-|---|---|
-| **Data** | Bybit `orderbook.200`: a snapshot, then 100 ms deltas. The book is stamped with matching-engine time (`cts`), and trade prints are merged in *before* the book update that reflects them. Tick and lot are auto-detected. RPI prints are dropped. [docs/dataset.md](docs/dataset.md) |
-| **Passive fills** | Our order joins the back of the displayed queue. It fills from prints at its price (only after the queue ahead is consumed; partial fills allowed), from prints *through* its price, or when the opposite quote crosses it. Depth decreases not explained by trades are cancellations, split between ahead of and behind us by a RiskAverse / Power(n) / Log queue model, after [hftbacktest](https://hftbacktest.readthedocs.io/en/latest/order_fill.html). [docs/assumptions.md](docs/assumptions.md) |
-| **Latency** | Three channels. **Feed:** the strategy sees a delayed book. **Entry:** orders *and cancels* land late, so stale quotes get picked off and late cancels come back `CancelRejected`. **Response:** the strategy's view of its own position lags. Optional lognormal jitter. |
-| **Orders** | Post-only, GTC, IOC and market. A local gateway refuses self-crosses and position-limit breaches. Maker and taker fees are separate; negative fees are rebates. |
-| **Attribution** | Every fill records the mid at fill and at +0.1 s, 1 s, 5 s, 30 s, 60 s and 300 s. `edge` is the spread captured at the fill instant; markout minus edge is adverse selection; gross PnL in bp of notional is the break-even maker fee. Also reported: net PnL after the cost of flattening, drawdown, inventory and quote uptime. |
-| **Speed** | L2 book updates: 33M/s (20 levels) and 62M/s (200 levels) on the bitmap price ladder, versus 12M/s and 8M/s for the original `std::map` book. Full backtest loop with a strategy: 5.7–6.2M events/s (`lob_bench`, synthetic). A real BTCUSDT day (860k book updates, 320k trades) replays in about 2.5 s from the compressed files; decompression and parsing are now the bottleneck. |
-
----
-
-## Strategies
-
-| Strategy | Idea | Source |
-|---|---|---|
-| `naive` | Join the best bid and ask; stop at a position limit. The control. | — |
-| `glft` | Closed-form optimal quotes with inventory skew. **σ** and fill intensity **λ(δ) = A·e^(−kδ)** are re-fitted every 5 s on a rolling 10-minute window of trades. The maker fee is added to quote depth. **Alpha:** an imbalance/microprice term shifts the fair price, with coefficients fitted on training days. Grid levels keep queue priority, and a depletion guard pulls a touch quote as soon as prints show its level being swept. | Guéant, Lehalle & Fernandez-Tapia (2013); hftbacktest GLFT and OBI tutorials; Stoikov (2018) |
-| `ladder` | For **large-tick** books (spread pinned at 1 tick, tick ≫ fee). Rest a ladder from the touch to N ticks behind it so the orders hold queue priority when price arrives. Pull only the touch order, and only when the imbalance alpha or trade-driven depletion says the level is about to break. | Moallemi & Yuan (queue value); Cont, Kukanov & Stoikov (2014) |
-| `imbalance` | Taker: cross the spread on extreme touch imbalance, exit after 5 s. Measures whether the signal can pay a taker fee. | Cont et al. (2014) |
-| `twap` | Execute a parent order in time slices, either crossing each slice immediately or posting it passively and sweeping the remainder. | — |
-| `probe` | Never-cancelled one-lot orders at scheduled points, used to score the fill model against L3 truth. | — |
-
----
-
-## Research workflow
-
-The process follows the [research notes](docs/research_notes.md).
-
-1. **Choose markets by arithmetic before backtesting.** `lob_sim --stats` across
-   24 liquid Bybit perpetuals (2026-10-01):
-
-   | Symbol | 1 tick | Spread − 2 × VIP0 maker fee |
-   |---|---|---|
-   | BTCUSDT | 0.012 bp | −3.99 bp |
-   | ETHUSDT | 0.037 bp | −3.96 bp |
-   | SOLUSDT | 0.85 bp | −3.15 bp |
-   | **ADAUSDT** | **4.1 bp** | **+0.04 bp** |
-   | **XLMUSDT** | **4.6 bp** | **+0.50 bp** |
-   | **ATOMUSDT** | **5.9 bp** | **+2.02 bp** |
-
-   On 21 of the 24 symbols, BTC and ETH included, a maker round trip at VIP0
-   (2 bp + 2 bp) costs more than the quoted spread *before* any adverse
-   selection. The study uses BTCUSDT, the most liquid control, and the three
-   large-tick contracts.
-
-2. **Fit signals out of sample.** `signal_research.py` regresses 1 s, 5 s and
-   30 s mid moves on the weighted-mid offset and depth imbalance. Coefficients
-   are fitted on days 1–4 and scored on days 5–8.
-
-   | Symbol | OOS correlation with the 5 s move (4 test days) |
-   |---|---|
-   | BTCUSDT | 0.13 – 0.18 |
-   | ATOMUSDT | 0.17 – 0.25 |
-   | ADAUSDT | 0.15 – 0.29 |
-   | XLMUSDT | 0.29 – 0.34 |
-
-   The signal is real and stable. Its *size* is the issue: a fraction of a
-   tick on large-tick books.
-
-3. **Walk-forward.** For every symbol × strategy × maker-fee tier (+2.0 bp
-   VIP0, 0 bp, −0.5 bp rebate):
-   - **Grid-search** parameters on 4 training days (2026-09-28 → 10-01).
-   - **Run** the selected parameters once on 4 untouched test days
-     (10-02 → 10-05).
-   - **Report** only test days. Training winners routinely decayed on test;
-     for example, ATOM GLFT went from +$1.16/day on training to −$16.81/day
-     on test.
-
-4. **Stress the selection.** Latency from 0 to 200 ms; queue models
-   RiskAverse and Log; the optimistic no-cross-fill bracket.
-
-5. **Validate the fill model** against order-level ground truth
-   ([Queue-model validation](#queue-model-validation)).
-
-Reproduce everything:
-
-```bash
-python python/experiments/study.py              # ~45 min on 10 cores
-python python/experiments/study.py --extended   # stage 2: grids extended where stage 1 hit a boundary
-python python/experiments/summarize_study.py    # -> results/study/SUMMARY.md, docs/plots/study_*.png
-```
-
----
-
-## Results
-
-All numbers are **out of sample**: Bybit USDT perpetuals, 4 test days,
-parameters chosen on 4 earlier days. Order sizes are a few hundred dollars.
-Full tables:
-- [results/study/SUMMARY.md](results/study/SUMMARY.md)
-- [results/taker/SUMMARY.md](results/taker/SUMMARY.md)
-
-### 1. Market making: no configuration is reliably profitable at any fee tier
-
-Selected configuration per cell. Net PnL is $/day averaged over test days;
-**gross bp** is PnL before fees in bp of traded notional, which is also the
-maker fee at which that configuration would break even.
-
-| | VIP0 (+2 bp maker) | 0 bp | Rebate (−0.5 bp) | Gross bp (break-even fee) | Edge at fill → 5 s markout (bp) |
-|---|---|---|---|---|---|
-| BTCUSDT naive | −11,949 | −3,576 | −1,482 | −0.85 | −0.20 → −0.83 |
-| BTCUSDT GLFT | −26 | −97 | −68 | −0.41 … −0.74 | +0.35 → −0.70 (rebate) |
-| ATOMUSDT naive | −480 | −229 | −166 | −1.83 | −0.40 → −1.98 |
-| ATOMUSDT GLFT | −17 | −11 | −11 | −2.1 … −3.3 | +4.1 → −2.2 (rebate) |
-| ATOMUSDT ladder | −65 | −31 | −22 | −1.79 | +2.8 → −2.0 |
-| XLMUSDT naive | −1,245 | −533 | −356 | −1.50 | −0.72 → −1.65 |
-| XLMUSDT GLFT | −16 | −15 | **+1.5** (2/4 days) | −0.32 … −2.9 | +3.0 → −0.50 (rebate) |
-| XLMUSDT ladder | −38 | −9 | −1.1 (2/4 days) | −0.57 … −0.73 | +2.0 → −0.36 |
-| ADAUSDT naive | −1,638 | −769 | −552 | −1.77 | −0.54 → −1.80 |
-| ADAUSDT GLFT | −47 | −42 | −37 | −1.65 … −2.4 | +2.0 → −2.0 (rebate) |
-| ADAUSDT ladder | −249 | −149 | −125 | −3.01 | +0.55 → −1.92 |
-
-![Out-of-sample gross edge](docs/plots/study_gross_edge.png)
-
-**Stage 2: extending the grids where stage 1 hit a boundary.** GLFT always
-picked the widest half-spread multiplier and the ladder the strongest alpha,
-so both grids were extended (half-spread up to 8×, alpha up to 5×) under the
-same split.
-
-- **Training days improved.** The best wide-quote GLFT configurations earned
-  +$15 to +$21/day on the training days.
-- **Test days did not.** Daily test PnL is indistinguishable from zero:
-
-  | Config (stage 2, selected on training days) | Test-day net PnL, $/day | Mean | t-stat |
-  |---|---|---|---|
-  | BTCUSDT GLFT, rebate, half-spread 8× | −15.8, +7.7, −2.7, +28.5 | +4.4 | 0.47 |
-  | XLMUSDT GLFT, VIP0, half-spread 8× | +34.3, −4.8, −4.4, +9.4 (5–14 fills/day) | +8.7 | 0.94 |
-  | ADAUSDT GLFT, rebate, half-spread 8× | −11.9, −3.9, −25.7, +76.0 | +8.6 | 0.38 |
-  | ATOMUSDT GLFT, VIP0, half-spread 3× | −41.7, +37.8, −54.3, +25.1 | −8.3 | −0.36 |
-
-- **Why:** quoting very wide means only being filled on overshoots. That is a
-  low-frequency bet on short-term mean reversion, not market making. With so
-  few fills, any single day is a coin flip.
-- **More test days:** see [Pooled out-of-sample](#pooled-out-of-sample-16-days).
-
-#### Pooled out-of-sample (16 days)
-
-**Method.** Four test days can reject a strategy that loses every day. They
-cannot tell a small edge from zero. So every selected GLFT and ladder
-configuration was re-run, parameters frozen, on 12 more days that were never
-used for selection (2026-09-16 → 09-27), and pooled with the 4 test days
-([results/study/EXTRA_OOS.md](results/study/EXTRA_OOS.md)).
-
-**Ordinary market making is decisively negative.**
-
-| Config | $/day | t-stat | Days > 0 |
-|---|---|---|---|
-| BTCUSDT GLFT, rebate | −77.5 | −10.7 | 0 of 16 |
-| ATOMUSDT ladder, VIP0 | −86.1 | −8.0 | 0 of 16 |
-| ADAUSDT ladder, VIP0 | −181.3 | −6.9 | 0 of 16 |
-| XLMUSDT ladder, VIP0 | −62.1 | −3.1 | 4 of 16 |
-
-Every touch-based configuration has a negative mean.
-
-**Wide-quote GLFT is the one recurring positive.** These configurations quote
-2–8× the GLFT half-spread and fill only on overshoots.
-
-| Symbol | VIP0 $/day (t) | Rebate $/day (t) | Fills/day |
-|---|---|---|---|
-| ADAUSDT | +22.4 (t = 2.28, 69% of days) | +14.8 (t = 2.35) | 120–290 |
-| ATOMUSDT | +2.9 (0.42) | +8.3 (1.22) | 170–340 |
-| XLMUSDT | +7.8 (1.88) | +4.9 (0.75) | 19–1,100 |
-| BTCUSDT | −1.7 (−0.43) | +1.2 (0.23) | 80–215 |
-
-About 28 configurations were examined to get here, so one or two
-|t| > 2 cells are expected by chance. The pattern is coherent and economically
-plausible: providing liquidity only into dislocations earns a reversal
-premium (Nagel 2012). But it is a *hypothesis*, so it got a pre-registered
-test.
-
-#### Pre-registered confirmation test (30 fresh days)
-
-[results/PREREGISTRATION.md](results/PREREGISTRATION.md) was committed and
-pushed *before* the confirmation data was downloaded. It fixes:
-- the eight configurations, with every parameter frozen;
-- a 30-day window, 2026-08-17 → 09-15, never touched before;
-- the pass/fail rules. The primary criterion is a daily ADA+ATOM+XLM
-  portfolio at VIP0 with t > 2 and more than half of days positive. Any
-  per-configuration claim needs t > 2.7 (Bonferroni).
-
-**Result: H1 not supported**
-([results/confirmation/CONFIRMATION.md](results/confirmation/CONFIRMATION.md)).
-
-| Pre-registered criterion | Mean $/day | t-stat | Days > 0 | Verdict |
-|---|---|---|---|---|
-| Primary: ADA+ATOM+XLM, VIP0 | +2.80 | +0.31 | 53% | not supported |
-| Secondary: ADA+ATOM+XLM, rebate | −5.67 | −0.74 | 57% | not supported |
-
-- **No single configuration came close to t > 2.7.** The best was ATOM at the
-  rebate tier, t = +0.79.
-- **ADAUSDT, the strongest candidate (t = 2.3 over 16 days), went to −$1.49/day
-  (t = −0.17) on fresh data.**
-- **What the wide-quote "edge" was:** selection noise across about 28
-  configurations, exactly what the multiple-comparisons warning predicted.
-  The pre-registration is what kept it from being reported as a result.
-
-What the table shows:
-
-- **Every gross bp is negative.** Every passive configuration on every symbol
-  loses money *before fees* out of sample. The fee tier only decides how much
-  more it loses. The one positive net cell, XLM GLFT with a rebate at
-  +$1.5/day, is positive on 2 of 4 days and is noise.
-- **The research ideas mostly reduce volume, not adverse selection.** ATOM
-  losses fall from -$480/day (naive) to -$65/day (ladder) at VIP0, but volume
-  falls 86% too, and gross PnL per dollar is unchanged (-1.83 vs -1.79 bp). Over
-  all 21 symbol x strategy x fee cells, edge at the fill rises in every one;
-  gross bp improves in 11, mainly for BTCUSDT and the XLM ladder, and it gets worse
-  for the ADA ladder (-1.77 to -3.01) and every ATOM GLFT cell. An earlier version
-  of this README presented the smaller dollar losses as the research features
-  paying off.
-- **None of it beats adverse selection.** Within 5 seconds the mid moves
-  through the fill by more than the spread captured. A resting order mostly
-  fills when the market is about to move through it, and that is the
-  mechanism Glosten–Milgrom and Moallemi–Yuan describe.
-- **BTCUSDT cannot work for a retail participant.**
-  - The spread is 0.012 bp, so a quote earns essentially nothing by sitting at the touch.
-  - GLFT's fee-aware quotes sit about 170 ticks out at VIP0 and only fill on large moves.
-  - At the rebate tier it quotes at the touch and loses −0.74 bp gross.
-
-  This matches the hftbacktest author's own caveat that their positive
-  results come "mainly from rebates", and that edge decayed from 0.0139%
-  per trade (2023) to 0.0044% (2025).
-
-**One out-of-sample day, dissected** (ATOMUSDT ladder, rebate tier, 2026-10-02):
-
-![Example run report](docs/plots/example_run_report.png)
-
-- **Fills at our price after the queue ahead is consumed** (49% of volume):
-  +5.8 bp at the fill, about 0 bp within 1 s.
-- **Fills where the level vanished and price crossed through the order**
-  (40%): about −3 bp throughout.
-- **Prints through the price** (11%): −5 to −7 bp.
-- **Net:** the rebate (+$8.6) doesn't cover the −$25 gross.
-
-### 2. The result is robust to latency and fill-model assumptions, except the queue model on large-tick books
-
-Re-running the selected configurations on test days:
-
-| | 0 ms → 200 ms latency (gross bp) | Optimistic (no cross-fills) | Queue: RiskAverse | Queue: Log |
-|---|---|---|---|---|
-| BTCUSDT GLFT, VIP0 | −0.41 → −0.96 | −0.47 | −0.41 | −0.41 |
-| BTCUSDT GLFT, rebate | −0.74 → −0.79 | −0.80 | −0.76 | −0.70 |
-| ATOMUSDT ladder, rebate | −1.79 → −2.07 | −1.85 | −2.01 | −0.46 |
-| XLMUSDT ladder, rebate | −0.57 → −0.60 | −0.48 | −0.82 | **+2.00** (+$69/day) |
-| ADAUSDT ladder, rebate | −3.01 → −1.92 | −3.15 | −3.42 | −2.27 |
-
-- **BTC is negative under every assumption.**
-- **On large-tick books the queue model decides the answer.**
-  - The Log model credits a near-front order with a larger share of the
-    cancellations ahead of it.
-  - So the order reaches the front more often, and front-of-queue fills are
-    the profitable ones.
-  - Under Log, the XLM ladder makes +2.0 bp gross (+$69/day at the rebate
-    tier), and +1.85 bp gross even at VIP0.
-- **A result whose sign flips with an unobservable modelling choice is not an
-  edge.** It is a hypothesis about queue dynamics, and the next section tests
-  it directly. The answer: the Log model over-fills by 31% against
-  order-level ground truth, so the positive Log-model results don't hold.
-
-### Queue-model validation
-
-L2 data cannot show where in a queue cancellations come from, but L3 data can.
-
-**Capture.** `capture_bitstamp_l3.py` records Bitstamp's public order-level
-feed for BTC/USD, ETH/USD and XRP/USD. Bitstamp is the only free
-unauthenticated L3 feed we found: Coinbase `full` and LOBSTER samples now
-require accounts.
-
-**Ground truth.** `l3_ground_truth.py` places probe orders at the touch every
-5 s and computes from exact order priority when each would truly have filled.
-
-**Scoring.** `queue_model_validation.py` runs the *actual C++ fill model*,
-under each queue model, on the 100 ms-conflated L2+trades view of the same
-market and scores each model's fills against the truth.
-
-**Data.** 150 minutes of BTC/USD, ETH/USD and XRP/USD: 3,598 probes per pair,
-scored at 5, 15 and 60 s horizons
-([results/queue_validation/VALIDATION.md](results/queue_validation/VALIDATION.md)).
-
-**BTC/USD is where the queue model matters**: 63% of true 60 s fills are
-queue-driven, meaning prints at the probe's own price after the queue ahead
-was consumed.
-
-| Model (BTC/USD, 60 s) | Simulated fill rate (true: 0.305) | Accuracy | Precision |
-|---|---|---|---|
-| Exact-queue L3 exchange (order-level replay) | 0.300 | 0.996 | 1.000 |
-| Power-2 (default) | 0.296 | 0.965 | 0.957 |
-| Power-3 | 0.297 | 0.965 | 0.953 |
-| RiskAverse | 0.277 | 0.972 | 1.000 |
-| **Log** | **0.392 (+29%)** | **0.889** | **0.747** |
-| Power-2 without cross-fills | 0.291 | 0.960 | 0.956 |
-
-**On ETH/USD and XRP/USD** almost every true fill comes from price moving
-through the probe. Every model scores 0.994–1.000 accuracy, *except* the
-no-cross-fill variant, which misses 41–49% of real 60 s fills, and more at
-shorter horizons.
-
-Two conclusions:
-
-1. **The Log queue model over-fills by about 29% against ground truth.** It
-   was the only assumption under which the XLM and ATOM ladders turned
-   positive in the sensitivity study, so that result is not credible. The
-   default Power-2 model is well calibrated.
-2. **Book-cross fills are real fills.** The "optimistic bracket" that drops
-   them is simply wrong, which makes the default model's adverse cross-fills
-   the realistic case, not a pessimistic one.
-
-The caveat is that this is Bitstamp, not Bybit. Queue dynamics differ by
-venue, and no public Bybit L3 feed exists.
-
-### 3. Taker strategies and execution
-
-**Imbalance taker.**
-- On BTCUSDT the imbalance signal is genuine: crossing in its direction earns
-  +0.24 to +0.28 bp gross per trade over the 4 test days.
-- The taker fee is 5.5 bp, so the net is −5.2 bp.
-- On ATOM, crossing a 5.9 bp tick costs more than the signal predicts.
-- This is why the signal belongs inside a passive quoter, not a taker.
-
-**Passive execution.** Each of 50 days is cut into 240 back-to-back 5-minute
-parent orders (alternating buy and sell, 5 slices each), worked by four
-algorithms on the same data: 12,000 paired parents per symbol. Nothing is
-fitted. 5 ms each-way latency, VIP0 fees
-([results/execution/EXECUTION.md](results/execution/EXECUTION.md),
-`python python/experiments/execution_study.py`).
-
-| Saving against crossing (bp, fees included) | Join | Peg | Smart | Peg, pessimistic queue | Peg, prints only | Peg, both (lower bound) |
-|---|---|---|---|---|---|---|
-| BTCUSDT | +2.04 | **+2.38** | +1.27 | +2.30 | +2.35 | +2.25 |
-| ATOMUSDT | +2.59 | **+3.56** | +2.37 | +3.48 | +1.99 | +1.64 |
-| XLMUSDT | +2.79 | **+3.69** | +2.47 | +3.60 | +2.47 | +1.97 |
-| ADAUSDT | +2.72 | **+3.42** | +2.77 | +3.32 | +2.55 | +2.12 |
+| **Exact-queue exchange** | **0 of 288,295** | **2 of 79,713**, both explained |
+| Standard L2 queue model (Power-2) | 13,096 (4.5%) | 1,400 (1.8%) |
+| L2, risk-averse | 735 (0.3%) | 11,410 (14.3%) |
+| L2, log | 20,947 (7.3%) | 3,264 (4.1%) |
+
+Orders that were cancelled are excluded, so the L2 rows are not unconditional
+error rates. [Method and caveats](docs/engine.md#order-level-l3-engine).
+
+### 2. Passive execution saves 1.6-3.7 bp, every day
+
+48,000 paired parent orders, 50 days, four Bybit contracts, nothing fitted.
+Pegging to the touch beat crossing the spread on **every day for every symbol**,
+by 2.4-3.7 bp under the default fill model and 1.6-2.3 bp under the harshest
+one. [Details](docs/results.md#3-taker-strategies-and-execution).
 
 ![Execution savings](docs/plots/execution_savings.png)
 
-- **Every passive algorithm beat crossing on every one of the 50 days, on every
-  symbol,** and pegging did so under every fill assumption tested. Day-clustered
-  t-statistics are 27 to 103.
-- **Pegging is best**: follow the touch, then sweep what is left at the end of
-  the slot. It fills 74-93% passively.
-- **The imbalance signal did not help execution.** Crossing early when the book
-  leans your way (Smart) improves the price but pays the taker fee more often.
-- **Where the saving comes from.** On BTCUSDT pegging saves 3.3 bp of fees and
-  gives back 0.9 bp of price. On the large-tick contracts it wins on both.
-- **How much depends on the fill model.** Assuming cancellations ahead never help
-  us ("pessimistic queue") costs under 0.1 bp. Dropping the rule that the
-  opposite quote reaching our price fills us ("prints only") costs up to 1.6 bp
-  on the large-tick contracts and nothing on BTC. Under both, the saving is
-  1.6-2.3 bp. Removing liquidity that has already printed between book updates
-  (`--consume-prints`) moves every figure by 0.06 bp or less
-  ([EXECUTION_CONSUMED.md](results/execution/EXECUTION_CONSUMED.md)).
+### 3. On Nasdaq, the maker rebate roughly equals adverse selection
 
-> An earlier version of this section reported a 1.8 bp saving from *four*
-> executions, one per day, and called it robust. This study replaces it. The
-> conclusion survived, the evidence did not.
-
-This is the one robustly positive, actionable result here: **use limit orders
-to *execute*, not to make markets**.
-
-### 4. Nasdaq market making with exact queue priority
-
-The Bybit study has three caveats: a 100 ms book, a modelled queue and an
-assumed rebate. Nasdaq's order-level feed removes all three. The same
-strategies run on 14 stocks with their orders in the real FIFO, microsecond
-latency, Nasdaq's published per-share fees, and end-of-day flattening.
-
-- **Development:** 10 days, 2019-01 to 2021-08, 24 ladder parameter sets plus a
-  touch-joining control ([DEV_GRID.md](results/nasdaq/DEV_GRID.md)).
-- **Confirmation:** 8 days, 2025-12 to 2026-06, downloaded only after
-  [five hypotheses and their thresholds](results/nasdaq/PREREGISTRATION.md)
-  were committed and pushed ([CONFIRMATION.md](results/nasdaq/CONFIRMATION.md)).
-
-| | Prediction | Result (8 days) | t | Verdict (threshold t = 3.0) |
-|---|---|---|---|---|
-| H1 | Touch-joining loses even at the top rebate, 50 µs | loses on 7 of 8 days | -2.20 | not supported |
-| H2 | The best ladder makes money at the top rebate | loses on 8 of 8 days | -2.03 | not supported (as expected) |
-| H3 | Gating on imbalance makes fills *more* adverse | -0.24 c/share, 8 of 8 days | -4.84 | **supported** |
-| H4 | 10 µs beats 10 ms | +0.53 c/share, 8 of 8 days | +2.69 | not supported |
-| H5 | Touch-joining is near zero-profit at 0 µs | +0.004 c/share, band ±0.10 | - | **supported** |
+Joining the touch with exact queue priority and zero latency nets about
+0 c/share after Nasdaq's top rebate (0.30 c), in 2019-21 data and again in 2025-26 data.
+Every step of latency costs more.
 
 ![Nasdaq latency curve](docs/plots/nasdaq_latency.png)
 
-- **The rebate prices adverse selection.** With no latency at all, joining the
-  touch loses 0.30-0.33 c/share before rebates in both periods, and Nasdaq's
-  top rebate is 0.30. That is the Glosten-Milgrom zero-profit condition, read
-  off real order flow.
-- **Latency is the rest of the story.** The loss grows at every step from 0 to
-  10 ms in both periods. H4 had the predicted sign every day, but
-  the effect was 0.04-0.22 c/share on the five December 2025 days and 1.0-1.4 on
-  the three 2026 days. That spread keeps t below its threshold, so it counts as
-  unconfirmed.
-- **Filtering on imbalance backfires,** which is the one effect that clears its
-  bar. A likely reason: it joins long queues at the back and gives up priority
-  to cancel, so it fills mostly when a level is swept.
-- **H1 is the same kind of near miss.** Losing on seven of eight days is not a
-  confirmed loss when the sizes vary this much: one day (2026-06-12) made
-  +$13.9k and one (2026-05-18) lost $90.2k.
+Five predictions were
+[pre-registered](results/nasdaq/PREREGISTRATION.md) before the 2025-26 days
+were downloaded:
 
-**How much depends on the simulator's assumptions?** Two things the feed cannot
-tell us are whether our fills should have taken volume from real makers, and
-whether an order arriving at a price that crosses our quote would have traded
-or was post-only. Both were bracketed *after* the verdicts were committed, on
-the same days, so this is exploratory
-([ROBUSTNESS.md](results/nasdaq/ROBUSTNESS.md)). Verdicts stand on the first row.
+| | Prediction | Verdict (threshold t = 3.0) |
+|---|---|---|
+| H1 | Touch-joining loses even at the top rebate, 50 µs | not supported (t = -2.20) |
+| H2 | The best ladder makes money at the top rebate | not supported (lost on 8 of 8 days) |
+| H3 | Gating on book imbalance makes fills *more* adverse | **supported** (t = -4.84) |
+| H4 | 10 µs beats 10 ms | not supported (t = +2.69) |
+| H5 | Touch-joining is near zero-profit at zero latency | **supported** (+0.004 c/share) |
 
-| Impact | Cross-fills | Share of market volume, 50 µs | H1 t | H2 t | H3 c/share (t) | H4 c/share (t) | H5 c/share |
-|---|---|---|---|---|---|---|---|
-| none | on (study default) | 21% | -2.20 | -2.03 | -0.24 (-4.84) | +0.53 (+2.69) | +0.004 |
-| none | off | 11% | -1.99 | -1.76 | -0.34 (-5.97) | +0.79 (+4.85) | -0.002 |
-| displace | on | 20% | -1.92 | -2.17 | -0.31 (-6.39) | +0.55 (+2.65) | +0.017 |
-| displace | off | 6% | -2.08 | -2.11 | -0.32 (-3.63) | +0.93 (+4.50) | -0.006 |
+H3 and H5 hold under [all four combinations](results/nasdaq/ROBUSTNESS.md) of
+the simulator's impact and fill assumptions. Dollar totals are not quoted: the
+simulated strategy trades 21% of market volume, more than a real one could
+without moving prices. [Full study](docs/results.md#4-nasdaq-market-making-with-exact-queue-priority).
 
-- **H3 and H5 hold under all four.** H1 and H2 miss under all four. H4 misses its
-  threshold only when cross-fills are on.
-- **The latency cost is not an artefact of the cross-fill rule.** That rule
-  supplies 48% of fills at 50 µs (2% at zero latency), which looked like the
-  explanation. Without it there are about half as many fills, and each one
-  loses *more*.
-- **Do not read the dollar totals.** The study-default control trades 21% of
-  Nasdaq's printed volume on the confirmation days, 47% in QQQ
-  ([PARTICIPATION.md](results/nasdaq/PARTICIPATION.md)), far more than a real
-  participant could without moving prices. No profit or loss is quoted from it.
-- **H5 is volume-weighted:** 57% of its weight is QQQ and NVDA. By symbol it
-  ranges from -0.51 (MU) to +0.10, median -0.05, with 10 of 14 within ±0.10. Zero latency is
-  a limit, not a setting anyone can buy.
+### What didn't work
+
+- **No market-making strategy here is profitable** out of sample, on any venue
+  or fee tier tested.
+- **Smarter quoting mostly meant quoting less.** GLFT and the ladder cut losses
+  77-100% against naive quoting, but cut volume 86-99.7%. Gross PnL per dollar traded
+  improved in only 11 of 21 comparisons.
+- **A promising pattern** (wide-quote GLFT, t = 2.3 over 16 days) **failed** its
+  [pre-registered test](results/confirmation/CONFIRMATION.md) on 30 new days (t = 0.31).
+- **Earlier versions of this README were wrong** about market-making profits and
+  over-claimed twice more. [What changed and why](docs/results.md#what-changed-and-why).
+
+## Engine
+
+| | |
+|---|---|
+| **Order book** | Order-level book with price-time priority: **50M messages/s, 18 ns p50, about 50 ns p99** per operation (Apple M2 Pro), 5x a `std::map`/`std::list` book. Pooled orders in intrusive FIFOs, open-addressing id map, bitmap price ladder. |
+| **Nasdaq ITCH 5.0** | Zero-copy, bounds-checked, fuzzed decoder. A full day (268.7M messages, 8,892 books) rebuilds in 22 s of compute with no inconsistencies. |
+| **Exchange simulation** | Real FIFO on order-level data, a calibrated queue model on L2. Separate feed, entry and response latency, so stale quotes get picked off. Per-share or bp fees, sessions, post-only/GTC/IOC/market, optional volume-displacement impact. |
+| **Live** | The same strategies paper-trade Bybit's real-time feed through a lock-free ring: **8.2 µs p50, 22 µs p99** tick-to-trade on a laptop. |
+| **Testing** | 117 C++ test cases including randomized differential tests against a reference book, 11 Python tests (a Python strategy must reproduce its C++ twin fill for fill), ASan, UBSan, TSan and libFuzzer in CI. |
+
+More in [docs/engine.md](docs/engine.md).
+
+## Get started
+
+**Python** (Python 3.9+, a C++17 compiler):
 
 ```bash
-python python/data/fetch_itch.py                                 # streams 18 days (~150 GB of traffic, ~5 GB kept)
-python python/experiments/nasdaq_study.py --stage dev
-python python/experiments/nasdaq_study.py --stage confirm
-python python/experiments/nasdaq_participation.py && python python/experiments/nasdaq_robustness.py
-python python/experiments/nasdaq_plots.py
+pip install .
+python -m pytest python/tests        # after: pip install pytest
 ```
 
-### 5. What it would take
+Then open [examples/quickstart.ipynb](examples/quickstart.ipynb): a backtest,
+fill attribution, a latency sweep, and a strategy written in Python.
 
-Reading the break-even column together with the sensitivity runs, a passive
-market maker on these contracts needs **at least one** of the following, by a
-margin of about 1–3 bp:
+```python
+class Join(lobsim.Strategy):                       # prices in ticks, sizes in lots
+    def on_book(self, ctx):
+        touch = ctx.best_bid[0]
+        for i, o in ctx.orders.items():
+            if o["price"] != touch and not o["cancel_sent"]:
+                ctx.cancel(i)
+        if not ctx.orders and ctx.position < 500:
+            ctx.limit("buy", touch, 100)
+```
 
-- **Faster cancellation than the 100 ms public book allows.**
-  - Bybit offers 10–20 ms books for top levels.
-  - Professional makers react in microseconds.
-  - The depletion guard, which reacts to individual prints, was picked by 19 of 21
-    walk-forward selection, so faster reaction clearly pays.
-- **A maker rebate deeper than −0.5 bp**, which means Bybit's market-maker
-  programme with its volume obligations.
-- **Validated front-of-queue priority**, as in the Log-model scenario, which
-  in practice means being early to every new level.
+**Command line**:
 
----
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja && cmake --build build -j
+./build/lob_tests && ./build/lob_bench_l3
+./build/lob_sim --help
 
-## What changed and why
+# one Nasdaq stock-day: streams about 3.5 GB, keeps about 7 MB
+python3 python/data/fetch_itch.py --days 2019-12-30 --symbols INTC
+./build/lob_sim --replay data/processed/itch_l3/2019-12-30_INTC.l3bin.gz --strategy naive --quote-on-book \
+                --order-size 100 --max-position 500 --latency-us 50 --maker-fee-per-unit -0.0030 \
+                --taker-fee-per-unit 0.0030 --session-start 09:35:00 --session-end 15:55:00 --output out/intc
 
-The original simulator's headline numbers were artifacts. In order of impact:
+# one Bybit day, and live paper trading (no account or keys)
+python3 -m venv python/.venv && python/.venv/bin/pip install -r python/requirements.txt
+python/.venv/bin/python python/data/download_bybit.py --symbol BTCUSDT --start 2026-10-03 --end 2026-10-03
+./build/lob_sim --live bybit --symbol BTCUSDT --minutes 10 --strategy naive --quote-on-book
+```
 
-| Problem | Effect | Fix |
-|---|---|---|
-| Passive fill rule only fired when the level qty went *up* at a fresh price, and cancelled the order when its level emptied | Orders joining a real queue could never fill; "fills" were noise | Trade-driven fills, a queue model and partial fills ([assumptions](docs/assumptions.md)) |
-| No trade data at all | No execution evidence; fills inferred from depth only | Bybit trade prints merged in engine time |
-| Live capture never recorded the initial snapshot | Every replay started from an empty book; the first state of the main session had a 277-tick spread | v2 capture with snapshots, trades and exact decimals |
-| Binance `bookDepth` converted into "price levels" | It is ±1–5% cumulative depth sampled every 30–60 s, not an order book; `mm_btc_20240405` was meaningless | Converter deleted; Bybit's real L2 archive used instead |
-| Quantities stored ×100 | 0.001 BTC levels rounded to zero | Integer lots from the detected lot size |
-| Cancels were instantaneous; one combined latency | No stale-quote risk, the main cost of latency | Separate feed, entry and response channels; cancel-after-fill rejects |
-| `ImbalanceStrategy` opened one position and never exited | One trade per session | Hold time and signal-flip exit |
-| Reported PnL with one fill-model assumption, one session, in-sample | Unfalsifiable | Walk-forward over 8 days, three fee tiers, latency and queue sweeps, L3 validation |
+On macOS with a broken system toolchain, build with Homebrew LLVM by setting
+`CMAKE_CXX_COMPILER`.
 
----
+## Documentation
+
+| | |
+|---|---|
+| [docs/results.md](docs/results.md) | Strategies, research workflow, every result, what failed, limitations |
+| [docs/engine.md](docs/engine.md) | Order book, ITCH, live runtime, how the simulator works |
+| [docs/assumptions.md](docs/assumptions.md) | Exactly what the fill model assumes, and which way each choice biases results |
+| [docs/architecture.md](docs/architecture.md) | Components, event ordering, threading |
+| [docs/dataset.md](docs/dataset.md) | Data sources and formats |
+| [docs/research_notes.md](docs/research_notes.md) | Literature notes |
+| [results/](results) | Committed tables and pre-registrations |
+
+```
+cpp/        include, src: core/ marketdata/ sim/ strategy/ live/ util/     app/ (CLI)  bench/  fuzz/  tests/  python/ (bindings)
+python/     lobsim/ (package)  data/ (downloaders)  analysis/  experiments/ (studies)  tests/
+examples/   quickstart.ipynb
+```
 
 ## Limitations
 
-- **On Bybit, fifty days and one market regime.** That is 8 selection/test days, 12
-  pooled out-of-sample days and 30 confirmation days, all from August to
-  October 2026. It is enough to reject the strategies here, but it is not a
-  claim about every market regime.
-- **Limited market impact.** By default our orders never change the replayed
-  market. `--impact displace` (L3) makes each printed share trade once and
-  leaves displaced makers in the queue, but nobody reacts to our orders and
-  prices do not move because of them. The default is reasonable at a few hundred
-  dollars per order on Bybit and is strained by the Nasdaq touch-joining control,
-  which reaches 21% of volume.
-- **On Bybit, the 100 ms book is a hard floor** on how fast a simulated strategy
-  can see cancellations. (The Nasdaq study has no such floor.) Results are pessimistic for a truly low-latency participant,
-  and the no-cross-fill bracket bounds that.
-- **The −0.5 bp rebate is a scenario**, not a published Bybit rate.
-  Programme terms are private.
-- **Funding is not modelled.** Holding periods are seconds to minutes.
-- **The L2 queue model is validated on Bitstamp and Nasdaq, not Bybit.** No public
-  Bybit L3 feed exists, and queue dynamics differ by venue.
-- **Nasdaq results see one venue.** Orders and quotes on other exchanges, and so
-  the national best bid and offer, are invisible. Marks use Nasdaq's own book.
-- **The Nasdaq fee schedule is today's, applied to every day.** Rebate tiers are
-  assumed, not earned: the top tier needs roughly 1% of US volume.
+- **Impact is limited.** Optional volume displacement stops a share trading twice,
+  but nobody reacts to our orders and prices don't move because of them.
+- **Nasdaq results see one venue** and 18 free sample days. The national best bid
+  and offer, and rebate eligibility, are not modelled.
+- **On Bybit the book is conflated to 100 ms** and the queue is modelled.
+- **Funding is not modelled,** and the sample covers few market regimes.
 
----
-
-## Repository layout
-
-```
-cpp/include, cpp/src   core/ (OrderBook, L3Book, PriceLadder)  marketdata/ (sources, .l3bin, ITCH 5.0)
-                       sim/ (Backtester, ExchangeSim, L3ExchangeSim)  strategy/  live/ (LiveBybitSource)
-                       util/ (FlatHashMap, ObjectPool, SpscRing)
-cpp/app, cpp/bench     lob_sim CLI; lob_bench (L2), lob_bench_l3 (order-level book)
-python/data            download_bybit.py, capture_bitstamp_l3.py, fetch_itch.py (streams Nasdaq ITCH days)
-python/analysis        signal_research.py, l3_ground_truth.py, queue_model_validation.py,
-                       itch_clone_validation.py, run_report.py
-python/experiments     run_backtests.py, study.py, summarize_study.py, extra_oos.py, confirm.py, l2_vs_l3.py,
-                       execution_study.py, nasdaq_study.py, nasdaq_confirm.py,
-                       nasdaq_participation.py, nasdaq_robustness.py, nasdaq_plots.py
-results/               study tables, fitted signals, taker/execution, Nasdaq study, queue validation, L2-vs-L3,
-                       live latency sessions, ITCH replay, pre-registration + confirmation
-cpp/fuzz               libFuzzer targets for the ITCH and Bybit parsers
-.github/workflows      CI: GCC/Clang/AppleClang builds + tests, ASan/UBSan, TSan, fuzzing
-docs/                  research_notes.md, assumptions.md, dataset.md, architecture.md
-```
+The [full list](docs/results.md#limitations) says more.
 
 ## Sources
 
