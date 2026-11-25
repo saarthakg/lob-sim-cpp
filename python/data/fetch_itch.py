@@ -11,11 +11,15 @@ order-level events are kept (a few MB each, gzipped).
     python data/fetch_itch.py --list
 """
 import argparse
+import http.client
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,28 +51,62 @@ FILES = {
 SYMBOLS = ["SIRI", "INTC", "CSCO", "CMCSA", "AMD", "MU", "F", "BAC", "PFE", "T", "AAPL", "MSFT", "QQQ", "NVDA"]
 
 
+def pump(url: str, sink, attempts: int = 60) -> None:
+    """Stream url into sink, resuming by byte range after a dropped connection.
+
+    curl --retry restarts a transfer from byte 0, which into a pipe would
+    append a second copy; here a retry continues at the exact next byte.
+    Stops quietly when the reader closes the pipe (it has seen 16:00)."""
+    pos, total, failures = 0, None, 0
+    while total is None or pos < total:
+        try:
+            req = urllib.request.Request(url, headers={"Range": f"bytes={pos}-"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                if r.status != 206 or not r.headers["Content-Range"].startswith(f"bytes {pos}-"):
+                    raise RuntimeError(f"server ignored the byte range (status {r.status})")
+                total = int(r.headers["Content-Range"].rsplit("/", 1)[1])
+                while chunk := r.read(1 << 20):
+                    try:
+                        sink.write(chunk)
+                    except BrokenPipeError:
+                        return
+                    pos += len(chunk)
+                    failures = 0
+        except (OSError, http.client.HTTPException) as e:
+            failures += 1
+            if failures >= attempts:
+                print(f"giving up at byte {pos}: {e}", flush=True)
+                return
+            time.sleep(min(60, 2 ** failures))
+
+
 def fetch(day: str, symbols: list, out: Path) -> bool:
     missing = [s for s in symbols if not (out / f"{day}_{s}.l3bin.gz").exists()]
     if not missing:
         print(f"{day}: already extracted", flush=True)
         return True
     local = ROOT / "data" / "raw" / "itch" / FILES[day]
-    if local.exists():
-        src, cmd = str(local), None
-    else:
-        # Feed ends at 16:00 for us, so the extractor closes the pipe early and
-        # curl exits with a write error; the extractor's status is what counts.
-        src = "-"
-        cmd = f"curl -sSfL --retry 5 '{BASE}{FILES[day]}' | gzip -dc"
+    src = str(local) if local.exists() else "-"
     # Work in a private directory and rename finished files into place, so a
     # concurrent or interrupted run can never leave a partial file behind.
     tmp = Path(tempfile.mkdtemp(prefix=f".{day}_", dir=out))
     args = [str(BIN), "--extract-itch", src, "--date", day, "--symbols", ",".join(missing), "--output", str(tmp)]
-    if cmd:
-        dl = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        r = subprocess.run(args, stdin=dl.stdout, capture_output=True, text=True)
-        dl.stdout.close()
-        dl.wait()
+    if src == "-":
+        gz = subprocess.Popen(["gzip", "-dc"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+        def feed():
+            pump(BASE + FILES[day], gz.stdin)
+            try:
+                gz.stdin.close()
+            except BrokenPipeError:
+                pass   # extractor finished at 16:00 and closed the pipe
+
+        t = threading.Thread(target=feed, daemon=True)
+        t.start()
+        r = subprocess.run(args, stdin=gz.stdout, capture_output=True, text=True)
+        gz.stdout.close()
+        t.join()
+        gz.wait()
     else:
         r = subprocess.run(args, capture_output=True, text=True)
     print(r.stdout + r.stderr, flush=True)
