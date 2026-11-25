@@ -113,6 +113,26 @@ calibrated on BTC/USD. Log over-fills by about 31%.
 - Funding payments are not modelled. Positions are held for seconds to
   minutes, and funding settles every 8 h.
 
+- US equities are charged **per share** (`--maker-fee-per-unit`,
+  `--taker-fee-per-unit`). The Nasdaq study uses the published schedule
+  (nasdaqtrader.com, read 2026-11-25): remove $0.0030; add, displayed, $0.0013
+  (Tape C) or $0.0018 (Tape A and B) for a firm with no volume tier, and $0.0030
+  for a top tier.
+
+## Trading session
+
+`--session-start` / `--session-end` bound trading to part of the day. Before the
+start the book is maintained but the strategy is not called. At the end every
+order is cancelled, and only once all cancels are confirmed is the position
+closed with market orders, whose spread and fees count in net PnL.
+
+## Order-level (L3) replay
+
+- Our orders sit in the real FIFO. A print naming maker M fills us first if we
+  have priority over M. A hidden print (no displayed maker) at our price fills
+  us only from the front of the queue; one through our price fills us.
+- Still no impact: the real maker also trades, and nobody reacts to our order.
+
 ## PnL accounting
 
 - **Ground truth.** `Portfolio` runs at exchange time on the true fill stream.

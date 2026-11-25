@@ -63,6 +63,9 @@ the `EventSource` and the `Exchange` change.
 | `marketdata/l3_format`, `marketdata/l3_record` | Fixed 48-byte binary order-level records (`.l3bin`); Bitstamp converter. |
 | `marketdata/bybit_parse` | Fixed-point parsers for Bybit book and trade messages, shared by the archive reader and the live feed. |
 | `sim/exchange`, `sim/l3_exchange_sim` | `Exchange` interface; exact-queue exchange for order-level replay. |
+| `marketdata/itch`, `marketdata/itch_book_builder`, `marketdata/itch_l3_extractor` | ITCH 5.0 decoder (bounds-checked, fuzzed), full-market books, and per-symbol `.l3bin` extraction. |
+| `util/input_file` | Plain, `.gz`, `.zip` or stdin byte stream; a failed decompressor throws. |
+| `strategy/execution_strategy` | Parent orders worked by cross / join / peg / smart algorithms, logged per parent. |
 | `live/live_bybit_source`, `util/spsc_ring` | Real-time feed on its own thread, handed to the engine through a lock-free SPSC ring (`lob_live` library, keeping networking out of `lob_core`). |
 | `marketdata/event_source` | `BybitHistoricalSource` is a hand-rolled parser for the JSON-lines book and the trade CSV. It merges trades before book updates with the same or later `cts` and auto-detects tick and lot. `NormalizedCsvSource` reads v2 and legacy v1 CSVs. `VectorSource` is used by tests. |
 | `marketdata/recorder`, `app/live_capture.hpp` | v2 capture with snapshots and trades. `book_sync` and `parser` handle the Binance U/u handshake and JSON. |

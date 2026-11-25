@@ -64,7 +64,7 @@ itself. It runs entirely on **free public data**.
 # build (macOS: if the system CLT is broken, use Homebrew LLVM — see docs/architecture.md)
 cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
 cmake --build build -j
-./build/lob_tests                                   # 89 test cases
+./build/lob_tests                                   # 104 test cases
 
 # data: one day of Bybit BTCUSDT book (~200 MB) + trades (~12 MB)
 python3 -m venv python/.venv && python/.venv/bin/python -m pip install -r python/requirements.txt
@@ -92,6 +92,13 @@ python/.venv/bin/python python/data/capture_bitstamp_l3.py --pairs btcusd --minu
 ./build/lob_sim --convert-bitstamp-l3 data/raw/bitstamp/<capture>.l3.jsonl --output btc.l3bin
 ./build/lob_sim --replay-l3 btc.l3bin                               # book-only throughput + consistency
 ./build/lob_sim --replay btc.l3bin --strategy naive --quote-on-book # exact-queue backtest
+
+# stream a Nasdaq day into per-symbol order files, then backtest one with exact queue priority
+python/.venv/bin/python python/data/fetch_itch.py --days 2019-12-30 --symbols INTC
+./build/lob_sim --replay data/processed/itch_l3/2019-12-30_INTC.l3bin.gz --strategy naive --quote-on-book \
+                --order-size 100 --max-position 500 --latency-us 50 \
+                --maker-fee-per-unit -0.0030 --taker-fee-per-unit 0.0030 \
+                --session-start 09:35:00 --session-end 15:55:00 --output data/processed/intc
 
 # a full Nasdaq day (free sample: emi.nasdaq.com/ITCH/Nasdaq ITCH/12302019.NASDAQ_ITCH50.gz)
 ./build/lob_sim --replay-itch 12302019.NASDAQ_ITCH50.gz --snapshot-time 10:30:00 --symbols AAPL,MSFT
@@ -156,6 +163,25 @@ before the real maker. Scored against the independent L3 ground truth
 | **Exact-queue L3 exchange** | **0.300** | **0.996** | **1.000** |
 | Best L2 queue model (Power-2) | 0.296 | 0.965 | 0.957 |
 | Log queue model | 0.392 | 0.889 | 0.747 |
+
+**Checked against real Nasdaq orders.** A real order's fate is in the feed, so
+it can referee the simulator. For 19,034 real displayed orders across 14
+stocks, a one-share simulated clone is placed right behind the real one.
+Price-time priority then brackets the clone's fill: never before the order
+ahead finished, never after the next order behind it traded. The bounds are
+computed in Python from the raw records, independently of the C++ book
+([results/itch/CLONE_VALIDATION.md](results/itch/CLONE_VALIDATION.md)).
+
+| Model (same market, 2019-12-30) | Impossible fills (jumped the queue) | Missed fills |
+|---|---|---|
+| **Exact-queue L3 exchange** | **0 of 19,034** | **0 of 4,146** |
+| L2 Power-2 (default) | 1,873 (9.8%) | 93 (2.2%) |
+| L2 RiskAverse | 88 (0.5%) | 781 (18.8%) |
+| L2 Log | 3,113 (16.4%) | 136 (3.3%) |
+
+The clones follow orders that were *not* cancelled, so the L2 rows show how
+often a model jumps a queue that really stayed in place. They are not
+unconditional error rates.
 
 Every strategy runs unchanged on both data paths, and `--exchange-model l2`
 scores the queue model on the same L3 market for a direct comparison
@@ -658,14 +684,18 @@ The original simulator's headline numbers were artifacts. In order of impact:
   claim about every market regime.
 - **No market impact.** Our orders never move the replayed book. That is
   valid at a few hundred dollars per order.
-- **The 100 ms book is a hard floor** on how fast a simulated strategy can see
-  cancellations. Results are pessimistic for a truly low-latency participant,
+- **On Bybit, the 100 ms book is a hard floor** on how fast a simulated strategy
+  can see cancellations. (The Nasdaq study has no such floor.) Results are pessimistic for a truly low-latency participant,
   and the no-cross-fill bracket bounds that.
 - **The −0.5 bp rebate is a scenario**, not a published Bybit rate.
   Programme terms are private.
 - **Funding is not modelled.** Holding periods are seconds to minutes.
-- **The queue model is validated on Bitstamp, not Bybit.** No public Bybit L3
-  feed exists, and queue dynamics differ by venue.
+- **The L2 queue model is validated on Bitstamp and Nasdaq, not Bybit.** No public
+  Bybit L3 feed exists, and queue dynamics differ by venue.
+- **Nasdaq results see one venue.** Orders and quotes on other exchanges, and so
+  the national best bid and offer, are invisible. Marks use Nasdaq's own book.
+- **The Nasdaq fee schedule is today's, applied to every day.** Rebate tiers are
+  assumed, not earned: the top tier needs roughly 1% of US volume.
 
 ---
 
@@ -676,12 +706,15 @@ cpp/include, cpp/src   core/ (OrderBook, L3Book, PriceLadder)  marketdata/ (sour
                        sim/ (Backtester, ExchangeSim, L3ExchangeSim)  strategy/  live/ (LiveBybitSource)
                        util/ (FlatHashMap, ObjectPool, SpscRing)
 cpp/app, cpp/bench     lob_sim CLI; lob_bench (L2), lob_bench_l3 (order-level book)
-python/data            download_bybit.py, capture_bitstamp_l3.py (order-level capture)
-python/analysis        signal_research.py, l3_ground_truth.py, queue_model_validation.py, run_report.py
-python/experiments     run_backtests.py, study.py, summarize_study.py, extra_oos.py, confirm.py, l2_vs_l3.py
+python/data            download_bybit.py, capture_bitstamp_l3.py, fetch_itch.py (streams Nasdaq ITCH days)
+python/analysis        signal_research.py, l3_ground_truth.py, queue_model_validation.py,
+                       itch_clone_validation.py, run_report.py
+python/experiments     run_backtests.py, study.py, summarize_study.py, extra_oos.py, confirm.py, l2_vs_l3.py,
+                       execution_study.py, nasdaq_study.py, nasdaq_confirm.py, nasdaq_plots.py
 results/               study tables, fitted signals, taker/execution, queue validation, L2-vs-L3,
                        live latency sessions, ITCH replay, pre-registration + confirmation
-.github/workflows      CI: GCC/Clang/AppleClang builds + tests, ASan/UBSan, TSan
+cpp/fuzz               libFuzzer targets for the ITCH and Bybit parsers
+.github/workflows      CI: GCC/Clang/AppleClang builds + tests, ASan/UBSan, TSan, fuzzing
 docs/                  research_notes.md, assumptions.md, dataset.md, architecture.md
 ```
 

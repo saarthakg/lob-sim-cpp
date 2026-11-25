@@ -28,6 +28,22 @@ python python/data/download_bybit.py --symbol BTCUSDT --start 2026-09-28 --end 2
                 --trades data/raw/bybit/BTCUSDT2026-10-03.csv.gz --strategy glft --order-size 0.01
 ```
 
+## Nasdaq TotalView-ITCH 5.0 (free sample days)
+
+`python/data/fetch_itch.py` streams a day (3-18 GB compressed) from
+`emi.nasdaq.com/ITCH/Nasdaq ITCH/` through `lob_sim --extract-itch -`, keeping
+one gzipped `.l3bin` per symbol (about 10 MB) and no raw feed. `--list` shows the 18 days.
+
+| Detail | Handling |
+|---|---|
+| Executions (`E`, printable `C`) | A print naming the maker order, then its size change |
+| Non-printable `C`, crosses | Book change only. Strategies trade 09:35-15:55, away from the auctions |
+| Hidden executions (`P`) | A print with maker id 0. Side inferred from the displayed mid (ITCH's own side field has been constant since 2014). Sub-penny prints are dropped: they execute inside a penny and say nothing about a displayed queue |
+| Orders below $1 | Skipped (stub quotes off the cent grid) |
+| Half-penny ticks (amended Rule 612) | The extractor counts off-cent orders and refuses the file |
+| Clock | ITCH nanoseconds truncated to the engine's microseconds; feed order kept |
+| Truncated or corrupt input | Throws. A short archive never looks like a short day |
+
 ## Live capture (normalized v2 CSV)
 
 `--live-capture SYMBOL --output file.csv` records Bybit `orderbook.200` and
