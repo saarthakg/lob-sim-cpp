@@ -180,3 +180,7 @@ full list with what was verified. Key references:
 - [hftbacktest](https://github.com/nkaz001/hftbacktest): queue models, GLFT and OBI market-making tutorials
 - [Bybit history data](https://www.bybit.com/derivatives/en/history-data), [public trades](https://public.bybit.com/trading/)
 - [Bitstamp WebSocket API v2](https://www.bitstamp.net/websocket/v2/) (live_orders L3)
+
+## License
+
+MIT, see [LICENSE](LICENSE).
