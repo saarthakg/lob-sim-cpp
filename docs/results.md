@@ -4,6 +4,11 @@ The full record behind the README summary: every table, what failed, and what ch
 
 ## Strategies
 
+These are **research baselines**, not production strategies. Each one tests a
+specific idea from the literature against realistic fills. None of the
+market makers is profitable out of sample; see
+[What it would take](#5-what-it-would-take).
+
 | Strategy | Idea | Source |
 |---|---|---|
 | `naive` | Join the best bid and ask; stop at a position limit. The control. | — |
@@ -425,7 +430,30 @@ python python/experiments/nasdaq_plots.py
 
 ### 5. What it would take
 
-Reading the break-even column together with the sensitivity runs, a passive
+No strategy in this repository makes money, and none was expected to. Simple
+quoting rules on public data compete with firms that have faster connections,
+better queue positions and more information. This section says what the gap is
+made of on each venue.
+
+**Nasdaq.** With exact queue priority and zero latency, joining the touch
+nets +0.004 c/share, but only at the top rebate. A profitable maker would need
+all of these:
+
+- **The top rebate tier.** At the base rebate (0.13–0.18 c), the same
+  zero-latency strategy loses about 0.16 c/share. The top tier needs roughly 1%
+  of US consolidated volume.
+- **Single-digit-microsecond reaction.** Each step from 0 µs to 10 ms costs more
+  (the latency table above). Zero latency is a limit, not something anyone can buy.
+- **An edge beyond the touch.** Book-imbalance gating made fills *more* adverse
+  (H3). The usable information is more likely in other venues, related
+  instruments and the time a level has existed.
+
+The untested idea best suited to this engine is a **queue-aware** maker. It
+would keep an order resting only while it is near the front of its queue, and
+post as soon as a new price level opens. It needs fresh Nasdaq days and a
+new pre-registration, because the eight confirmation days are spent.
+
+**Bybit.** Reading the break-even column together with the sensitivity runs, a passive
 market maker on these contracts needs **at least one** of the following, by a
 margin of about 1–3 bp:
 

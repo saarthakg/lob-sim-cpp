@@ -7,6 +7,16 @@ Python API on top, and a research workflow built so it can't fool itself. It
 runs entirely on free public data: Nasdaq's full order feed, Bybit perpetuals
 and Bitstamp.
 
+**What this is, and isn't.** This is a simulator, plus research on what
+simple market making earns once fills are realistic. It is **not a profitable
+trading strategy**. The strategies here are research baselines, and none makes
+money out of sample. The research explains why: on Nasdaq the maker rebate
+roughly pays for adverse selection, so joining the touch breaks even at zero
+latency and loses more with every microsecond. Real market makers earn their
+edge from things public data can't provide: speed, queue priority at new price levels, signals from
+other venues, and rebate tiers that take a large share of US volume to qualify
+for.
+
 ```python
 import lobsim
 
@@ -73,7 +83,9 @@ without moving prices. [Full study](docs/results.md#4-nasdaq-market-making-with-
 ### What didn't work
 
 - **No market-making strategy here is profitable** out of sample, on any venue
-  or fee tier tested.
+  or fee tier tested. That is the expected outcome for simple rules on public
+  data, and a backtest that said otherwise would more likely point to a
+  simulator bug. [What it would take](docs/results.md#5-what-it-would-take).
 - **Smarter quoting mostly meant quoting less.** GLFT and the ladder cut losses
   77-100% against naive quoting, but cut volume 86-99.7%. Gross PnL per dollar traded
   improved in only 11 of 21 comparisons.
